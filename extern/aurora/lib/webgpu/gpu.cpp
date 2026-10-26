@@ -1047,11 +1047,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
 #ifdef WEBGPU_DAWN
     wgpu::DawnCacheDeviceDescriptor cacheDescriptor({.nextInChain = nullptr});
     cacheDescriptor.SetDawnLoadCacheDataCallback(
-        [](std::span<const std::byte> key, std::span<std::byte> value) noexcept -> size_t {
+        [](std::span<const std::byte> key, std::span<std::byte> value) -> size_t {
           return load_from_cache(key.data(), key.size(), value.data(), value.size(), nullptr);
         });
     cacheDescriptor.SetDawnStoreCacheDataCallback(
-        [](std::span<const std::byte> key, std::span<const std::byte> value) noexcept {
+        [](std::span<const std::byte> key, std::span<const std::byte> value) {
           store_to_cache(key.data(), key.size(), value.data(), value.size(), nullptr);
         });
 

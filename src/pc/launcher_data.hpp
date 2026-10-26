@@ -33,22 +33,38 @@ struct Preferences {
 
     bool vsync = true;
     bool fullscreen = false;
+#if defined(MELEE_XBOX_UWP)
+    float scale = 1.5f;
+#else
     float scale = 1.0f;
+#endif
 #if defined(__ANDROID__)
     float render_scale = 1.0f, volume = 1.0f;
     int msaa = 1, anisotropy = 1;
 #else
     float render_scale = 0.0f, volume = 1.0f;
+#if defined(MELEE_XBOX_UWP)
+    int msaa = 4, anisotropy = 16;
+#else
     int msaa = 1, anisotropy = 16;
 #endif
+#endif
+#if defined(MELEE_XBOX_UWP)
+    int widescreen = 1;
+#else
     int widescreen = 0;
+#endif
     int filter_mode = 0;
     int backend = 0;
     bool mute = false, fps = false, reverb = true;
     bool check_updates = true;
     bool custom_textures = true;
     bool unlock_all = false;
+#if defined(MELEE_XBOX_UWP)
+    int hud_mode = 1;
+#else
     int hud_mode = 0;
+#endif
     bool frozen_stadium = false;
     bool free_camera = false;
     bool ucf = false;

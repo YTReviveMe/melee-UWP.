@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Fail the ELF/PE link if rollback markers do not contain required game globals."""
 import argparse
+import re
 import subprocess
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--nm', required=True)
+    parser.add_argument('--map', help='lld-link map file for stripped UWP images')
     parser.add_argument('image')
     parser.add_argument('--tracked', nargs='+', required=True)
     parser.add_argument('--excluded', nargs='+', required=True)
@@ -18,6 +20,12 @@ def main():
         if len(words) == 3:
             try: addresses[words[2]] = int(words[0], 16)
             except ValueError: pass
+    if args.map and '__melee_data_start' not in addresses:
+        with open(args.map, encoding='utf-8') as map_file:
+            for line in map_file:
+                match = re.match(r'^\s*[0-9A-Fa-f]{4}:[0-9A-Fa-f]{8}\s+(\S+)\s+([0-9A-Fa-f]{16})\s+', line)
+                if match:
+                    addresses[match.group(1)] = int(match.group(2), 16)
     ranges = [(addresses[f'__melee_{kind}_start'], addresses[f'__melee_{kind}_end']) for kind in ('data','bss')]
     if any(end <= start for start, end in ranges):
         raise SystemExit('Rollback section is empty or reversed')

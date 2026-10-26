@@ -18,7 +18,7 @@
  * "net: FP PERTURB ..." on every run, and tools/package_windows.sh refuses
  * to package an image containing that marker.
  *
- * ponytail: one ULP away from zero on finite non-zero results is enough to
+ * one ULP away from zero on finite non-zero results is enough to
  * prove the harness is sensitive to a libm difference; a real one is many
  * ULP across many functions. If a future test needs a specific wrong value,
  * give perturb() a table rather than widening the option. */

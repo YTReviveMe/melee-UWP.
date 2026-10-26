@@ -5,8 +5,6 @@
 # explicit list there is churn no human reads. A glob silently absorbs a stray
 # file and silently drops a renamed one, so the result is pinned against a
 # committed manifest and any drift is a hard configure error.
-# ponytail: plain sorted text file plus list(REMOVE_ITEM) set difference; no
-# python helper, no hashing, no per-directory CMakeLists.
 
 option(MELEE_UPDATE_SOURCE_MANIFEST "Rewrite cmake/game_sources.manifest from the source tree" OFF)
 

@@ -221,7 +221,7 @@ def datagram_session(rng, session, player, version, base, extremes=True):
         if rng.randrange(4) == 0:
             body = body[:-1]
     elif kind < 9:  # reliable: handshake types, user types, len vs body
-        # ponytail: 0x12 (REL_RESUME) is left out. on_rel dispatches it into
+        # 0x12 (REL_RESUME) is left out. on_rel dispatches it into
         # net_resume_rel (net_reliable.c:134-135), where a 20-byte payload with
         # a session or seed that is not ours ends the session with
         # PC_NET_PEER_RESUME by design (net.c:706-730) -- a legitimate teardown,

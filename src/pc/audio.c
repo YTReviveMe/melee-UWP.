@@ -1,22 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #define _GNU_SOURCE
-/*
- * Software AX: the GameCube audio voice mixer, on an SDL3 audio stream.
- *
- * Melee's sound engine (sysdolphin synth.c / axdriver.c) drives AX voices:
- * DSP-ADPCM (or PCM) samples in ARAM, a 16.16 sample-rate-conversion ratio,
- * a per-sample volume envelope and L/R mix, plus a 5ms frame callback that
- * the engine uses to update envelopes and reap finished voices. All of that
- * is reproduced here at AX's native 32kHz in 160-sample frames, rendered on
- * demand from SDL's pull callback.
- *
- * Endianness: AXSetVoiceAddr/Adpcm/AdpcmLoop receive parameter blocks copied
- * verbatim from disc (.ssm/.hps headers) and are big-endian; every other
- * setter takes host-native values. The mirror `AXVPB.pb` the engine reads
- * back (state, currentAddress) is kept host-native.
- *
- * ponytail: no ITD and no surround; stereo dry mix plus the two aux busses.
- */
 #include <dolphin/ai.h>
 #include "pc/pc.h"
 #include "pc/music_stream.h"
@@ -27,10 +10,22 @@
 
 #include <SDL3/SDL.h>
 #include <math.h>
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/pthread_compat.h"
+#else
 #include <pthread.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef MELEE_XBOX_UWP
+void pc_xbox_audio_start(float gain);
+void pc_xbox_audio_push(const float* samples);
+void pc_xbox_audio_set_volume(float gain);
+void pc_xbox_audio_stop(void);
+static bool s_xbox_native_audio;
+#endif
 
 static pthread_mutex_t s_audio_mutex;
 static pthread_once_t s_audio_mutex_once = PTHREAD_ONCE_INIT;
@@ -60,9 +55,6 @@ static inline void audio_unlock(void) {
 #define PC_AUDIO_SIMD_NEON 1
 #endif
 
-/* Cached once: getenv() scans the whole environment, and these guards sit
- * on per-draw / per-voice paths where that cost is not acceptable even
- * when the diagnostic is switched off. */
 static int pc_dbg_audio_stats(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -100,6 +92,9 @@ static float s_sfx_volume = 1.0f;
 
 void pc_audio_set_volume(float volume) {
     s_master_volume = volume;
+#ifdef MELEE_XBOX_UWP
+    pc_xbox_audio_set_volume(volume);
+#endif
     if (s_stream)
         SDL_SetAudioStreamGain(s_stream, volume);
 }
@@ -120,10 +115,6 @@ float pc_audio_get_sfx_volume(void) {
     return s_sfx_volume;
 }
 
-/* Weak fallbacks for pc_get_music_volume and pc_get_sfx_volume when running in
- * standalone test binaries (e.g. tools/test_audio_stream) where launcher.cpp
- * is not linked. When linked into the game executable, launcher.cpp provides
- * the strong definitions returning prefs.music_volume and prefs.sfx_volume. */
 __attribute__((weak)) float pc_get_music_volume(void) {
     return s_music_volume;
 }
@@ -153,9 +144,6 @@ static inline s16 clamp16(s64 v) {
     return v > 32767 ? 32767 : v < -32768 ? -32768 : (s16)v;
 }
 
-/* ---- sample fetch ------------------------------------------------------ */
-
-/* Reads the next source sample; returns false once the voice has ended. */
 static bool next_sample(Voice* v, s16* out) {
     AXPB* pb = &v->vpb.pb;
     u16 format = pb->addr.format;
@@ -164,15 +152,8 @@ static bool next_sample(Voice* v, s16* out) {
         return false;
     }
 
-    /* Every read below indexes the 16MB ARAM buffer directly. A voice whose
-     * address pair is wrong -- a torn AXSetVoiceAddr from the game thread, a
-     * bank whose ARAM allocation was freed, a .ssm header read with the wrong
-     * relocation -- would otherwise read up to 2GB past the buffer. Ending
-     * the voice is what the mixer already does for a finished one, so the
-     * voice is reaped instead of faulting. */
     switch (format) {
     case AX_FORMAT_ADPCM: {
-        /* 16 nibbles per frame: 2 header nibbles, 14 sample nibbles. */
         if ((v->cur_addr & 15) == 0) {
             if ((v->cur_addr >> 1) + 2 > PC_ARAM_SIZE) {
                 return false;
@@ -190,10 +171,6 @@ static bool next_sample(Voice* v, s16* out) {
         u32 coef = (v->pred_scale >> 4) & 7;
         s32 c0 = (s16)pb->adpcm.a[coef][0];
         s32 c1 = (s16)pb->adpcm.a[coef][1];
-        /* s64 accumulator: a bank read with the wrong relocation yields
-         * coefficients and a scale whose four terms overshoot s32, and
-         * signed overflow is undefined behaviour that -O2 may fold the
-         * clamp away against. */
         s64 acc = (s64)nibble * scale * 2048 + 1024 + (s64)c0 * v->yn1 + (s64)c1 * v->yn2;
         s32 sample = clamp16(acc >> 11);
         v->yn2 = v->yn1;
@@ -220,10 +197,6 @@ static bool next_sample(Voice* v, s16* out) {
         return false;
     }
 
-    /* AX end addresses are inclusive. HPS jumps into the next ring block
-     * here, then updates endAddress at the following synth callback. That
-     * loop target can be ABOVE the old end: equality after decoding (not a
-     * range check before it) lets the new block advance in the meantime. */
     if (v->cur_addr == v->end_addr) {
         if (pb->addr.loopFlag) {
             v->cur_addr = v->loop_addr;
@@ -241,40 +214,22 @@ static bool next_sample(Voice* v, s16* out) {
     return true;
 }
 
-/* ---- aux busses -------------------------------------------------------- */
-
-/* AX has two auxiliary send busses. Voices send into them with the vAuxA and
- * vAuxB mix levels, the registered AXFX callback processes the bus in place,
- * and the result is summed back into the dry mix. Melee puts stage reverb on
- * aux A. AX aux buffers are 32-bit and carry L, R and surround; nothing here
- * feeds surround (mix_voice sends L and R only, and the vAuxAS/vAuxBS levels
- * belong to AX's Dolby surround mode, which this stereo mixer does not
- * have), so the effects process L and R and surround stays zero. */
 typedef struct AuxBus {
     void (*cb)(void*, void*);
     void* ctx;
-    /* `long`, not s32: AXFX_BUFFERUPDATE types its channels `long*`, which is
-     * 64-bit on LP64. A 32-bit buffer here is overrun by the effect. */
     long ch[3][AX_FRAME];  // NOLINT: Dolphin SDK AXFX_BUFFERUPDATE expects long*
-    /* Gate state; see run_aux. */
     int quiet; /* consecutive frames with a silent input and a wet output below the floor */
     int hold;  /* frames that covers the effect's longest delay line */
     int runs;  /* frames the effect ran; MELEE_AUDIO_STATS */
 } AuxBus;
 
 static AuxBus s_auxA, s_auxB;
-/* pc_audio_set_reverb(false) stops voices sending to the aux busses. The dry
- * mix is untouched, and run_aux's gate then lets the tail already in the
- * effects ring out and stops running them, so off costs nothing. */
 static bool s_aux_on = true;
 
 void pc_audio_set_reverb(bool on) {
     s_aux_on = on;
 }
 
-/* Helper to identify whether a voice belongs to an HPS music stream or SFX.
- * In Melee, music is streamed in 64 KiB ring buffer blocks (DSP-ADPCM), acquired
- * at priority 0x1D (29), and updated via AXSetVoiceLoopAddr / CurrentAddr / EndAddr. */
 static bool is_music_stream(Voice* v) {
     if (v->vpb.pb.addr.format != AX_FORMAT_ADPCM) {
         return false;
@@ -286,9 +241,6 @@ static bool is_music_stream(Voice* v) {
         v->is_stream = true;
         return true;
     }
-    /* HPS music stream ring buffer detection: HPS blocks have 64 KiB spacing
-     * (0x10000 bytes = 0x20000 in nibble-addressed ADPCM).
-     * When looping across 64 KiB boundaries between ring buffer blocks: */
     if (v->vpb.pb.addr.loopFlag) {
         u32 diff = v->loop_addr > v->cur_addr ? (v->loop_addr - v->cur_addr) :
                                                 (v->cur_addr - v->loop_addr);
@@ -332,8 +284,6 @@ static void mix_voice(Voice* v, float* out) {
 
     bool is_silent = ((vol == 0 && delta == 0) || (vl == 0.0f && vr == 0.0f)) && !send_a && !send_b;
 
-    /* If ratio is 0, no source samples can ever be consumed (v->frac += 0).
-     * If the voice is silent, nothing is mixed and no samples advance. Early exit! */
     if (ratio == 0) {
         if (is_silent) {
             return;
@@ -365,8 +315,6 @@ static void mix_voice(Voice* v, float* out) {
         return;
     }
 
-    /* Fast path for silent voices: advance sample decoding, stream ring buffers,
-     * and end-of-voice checks without any floating-point arithmetic or buffer writes. */
     if (is_silent) {
         if (ratio == 0x10000) {
             for (int i = 0; i < AX_FRAME; i++) {
@@ -415,9 +363,6 @@ static void mix_voice(Voice* v, float* out) {
         return;
     }
 
-    /* Fast path for 1:1 playback (ratio == 0x10000, 32kHz native GameCube rate).
-     * Consumes exactly 1 sample per frame step.
-     * When v->frac == 0, no fractional interpolation is performed: s = v->prev. */
     if (ratio == 0x10000 && v->frac == 0) {
         if (delta == 0 && !send_a && !send_b) {
             float scale_l = ((float)vol * (1.0f / 32767.0f)) * vl * (1.0f / 32768.0f);
@@ -476,7 +421,6 @@ static void mix_voice(Voice* v, float* out) {
         return;
     }
 
-    /* Fast path for ratio == 0x10000 with non-zero phase: phase remains constant throughout. */
     if (ratio == 0x10000) {
         float t = (float)v->frac * (1.0f / 65536.0f);
         for (int i = 0; i < AX_FRAME; i++) {
@@ -514,7 +458,6 @@ static void mix_voice(Voice* v, float* out) {
         return;
     }
 
-    /* General sample-rate conversion path (ratio != 0x10000) */
     for (int i = 0; i < AX_FRAME; i++) {
         v->frac += ratio;
         while (v->frac >= 0x10000) {
@@ -522,23 +465,7 @@ static void mix_voice(Voice* v, float* out) {
             if (!next_sample(v, &s)) {
                 pb->state = 0;
                 pb->ve.currentVolume = (u16)(vol < 0 ? 0 : vol > 32767 ? 32767 : vol);
-                /* The mirror the game reads back has to follow on this path
-                 * too: stopRange() matches a voice against the bank being
-                 * unloaded by pb.addr.currentAddress, and the HPS block swap
-                 * derives the stream position from it. Without this the
-                 * field stayed at the previous frame's value, reporting the
-                 * voice up to one frame short of where it really stopped. */
                 set_addr(&pb->addr.currentAddressHi, &pb->addr.currentAddressLo, v->cur_addr);
-                /* frac is deliberately left alone. It holds one whole
-                 * unsatisfied sample step plus the sub-sample phase, and
-                 * nothing at end-of-voice should discard that: on hardware
-                 * the DSP's SRC phase survives an end too, and the reset
-                 * arrives only with an explicit SRC block (AXSetVoiceSrc,
-                 * which the HPS block swap does supply and which sets frac
-                 * from currentAddressFrac). A voice restarted with only
-                 * AXSetVoiceCurrentAddr therefore keeps its phase, and the
-                 * retained whole step is what consumes the first sample of
-                 * the new block instead of skipping it. */
                 return;
             }
             v->prev = v->cur;
@@ -570,27 +497,8 @@ static void mix_voice(Voice* v, float* out) {
     set_addr(&pb->addr.currentAddressHi, &pb->addr.currentAddressLo, v->cur_addr);
 }
 
-/* -80 dBFS RMS over both channels of a frame, as a sum of squares of
- * normalised samples: the floor Dusklight's reverb gate uses
- * (src/dusk/audio/DuskDsp.cpp). */
 #define AUX_QUIET_ENERGY (2.0f * AX_FRAME * 1e-8f)
 
-/* Runs the bus's effect and mixes its output back, unless the effect has
- * gone quiet. It used to run every frame, and on silence that is worse than
- * wasted work: the reverb's lines decay into denormals and stay there (the
- * smallest denormal times the damping rounds back to itself), which on an LP
- * E-core cost 1.2 ms of every 5 ms frame against 13 us with a signal --
- * measured replaying a captured VS scene whose only sends are in its first
- * two seconds. So, like Dusklight's gate, the effect is skipped once its
- * input is silent and its output has stayed under AUX_QUIET_ENERGY for `hold`
- * frames in a row, not one: an echo can still be travelling down a line
- * while the output is silent (the aux B delay's left line is 310 ms), so
- * only a quiet stretch as long as the longest line shows the state is below
- * the floor. That state is kept, and resumes with the next send.
- *
- * "Silent input" is the bus itself being all zero rather than no voice
- * having a send level: a voice faded to volume 0 keeps its send level and
- * would hold the gate open on silence. */
 static void run_aux(AuxBus* bus, float* out) {
     struct AXFX_BUFFERUPDATE bu;
     void (*cb)(void*, void*) = bus->cb;
@@ -627,21 +535,13 @@ static void render_frame(float* out) {
     memset(s_auxA.ch, 0, sizeof(s_auxA.ch));
     memset(s_auxB.ch, 0, sizeof(s_auxB.ch));
 
-    /* 1. Run the GameCube 5ms synth callback under OS interrupts disabled,
-     * maintaining strict GC timer interrupt semantics. Audio mutex is also
-     * acquired so any AX setters invoked from inside s_frame_callback are safe. */
     BOOL intr = OSDisableInterrupts();
     audio_lock();
     if (s_frame_callback) {
         s_frame_callback();
     }
-    /* Release global OS interrupt lock IMMEDIATELY after the synth callback.
-     * This decouples the audio DSP rendering from the game thread, preventing
-     * controller polling (HSD_PadRead), vblank, alarms, and GX operations
-     * from stalling on audio processing. */
     OSRestoreInterrupts(intr);
 
-    /* 2. Process voice mixing and aux effect routing under audio_lock. */
     int n_used = 0, n_running = 0, n_stopped = 0, n_zero_mix = 0;
     int n_zero_ratio = 0, n_loop = 0, n_old = 0;
     for (int i = 0; i < AX_VOICES; i++) {
@@ -651,13 +551,6 @@ static void render_frame(float* out) {
             continue;
         }
         n_used++;
-        /* Age every voice the pool is holding, running or not. A voice left
-         * `used` with state 0 -- ended but never AXFreeVoice'd, or acquired
-         * and never started -- is inaudible AND unavailable, which is
-         * exactly what "sound works, then stops" looks like once 64 of them
-         * accumulate. The previous code reset age whenever state != 1, so
-         * the stuck-voice dump could only ever report the running variety
-         * and was blind to the stopped one. */
         if (++v->age == 2001) { /* 10s of AX frames */
             if (pc_dbg_audio_stats()) {
                 fprintf(stderr,
@@ -688,26 +581,13 @@ static void render_frame(float* out) {
         mix_voice(v, out);
     }
 
-    /* 3. Schroeder reverb aux effects execute under audio_lock so
-     * AXRegisterAux*Callback and effect lifecycle functions cannot race
-     * with active processing. */
     run_aux(&s_auxA, out);
     run_aux(&s_auxB, out);
     audio_unlock();
 
-    /* 4. Music streaming and SIMD clamping run completely lock-free. */
     if (pc_music_stream_mix) {
         pc_music_stream_mix(out, NULL, AX_FRAME);
     }
-    /* MELEE_AUDIO_STATS=1: voice census against the output clock, so a
-     * silent stretch in MELEE_AUDIO_DUMP can be explained -- were there no
-     * voices, were they all stopped, or were they running at zero volume?
-     * `stopped` is the diagnostic for the pool leak: those slots are held
-     * but inaudible, so `used` climbing to 64 with `running` low means the
-     * game is not calling AXFreeVoice on voices the mixer already ended.
-     * `old` counts voices held for over ten seconds, which for a one-shot
-     * sound effect means it was never reaped. `aux` is how many of those
-     * 100 frames ran each aux effect, i.e. what run_aux's gate let through. */
     if (pc_dbg_audio_stats()) {
         static uint64_t frames;
         frames++;
@@ -720,8 +600,6 @@ static void render_frame(float* out) {
             s_auxA.runs = s_auxB.runs = 0;
         }
     }
-    /* AX sums into a 16-bit accumulator and saturates; do the same so a busy
-     * scene distorts the way the hardware does instead of wrapping. */
 #if defined(PC_AUDIO_SIMD_SSE2)
     const __m128 vmaster = _mm_set1_ps(s_master);
     const __m128 vone = _mm_set1_ps(1.0f);
@@ -762,7 +640,6 @@ static void render_frame(float* out) {
 #endif
 }
 
-/* MELEE_AUDIO_DUMP=<file>: also write the mix as raw f32 stereo 32kHz. */
 static FILE* s_dump;
 
 static void SDLCALL audio_pull(void* userdata, SDL_AudioStream* stream, int additional, int total) {
@@ -771,6 +648,10 @@ static void SDLCALL audio_pull(void* userdata, SDL_AudioStream* stream, int addi
     (void)total;
     while (additional > 0) {
         render_frame(frame);
+#ifdef MELEE_XBOX_UWP
+        if (s_xbox_native_audio)
+            pc_xbox_audio_push(frame);
+#endif
         SDL_PutAudioStreamData(stream, frame, sizeof(frame));
         if (s_dump) {
             fwrite(frame, sizeof(frame), 1, s_dump);
@@ -786,7 +667,6 @@ void pc_audio_pump(void) {
         return;
     pumping = 1;
     float frame[AX_FRAME * 2];
-    // Keep the browser consumer fed without re-entering game callbacks from JS.
     while (SDL_GetAudioStreamQueued(s_stream) < AX_RATE * 2 * sizeof(float) / 20) {
         render_frame(frame);
         if (!SDL_PutAudioStreamData(s_stream, frame, sizeof(frame)))
@@ -795,8 +675,6 @@ void pc_audio_pump(void) {
     pumping = 0;
 }
 #endif
-
-/* ---- AX API ------------------------------------------------------------ */
 
 void AXInit(void) {
     pthread_once(&s_audio_mutex_once, init_audio_mutex);
@@ -810,6 +688,12 @@ void AXInit(void) {
     }
     if (s_stream == NULL) {
         const SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, AX_RATE};
+#ifdef MELEE_XBOX_UWP
+        const char* xbox_audio_driver = getenv("MELEE_XBOX_AUDIO_DRIVER");
+        if (xbox_audio_driver == NULL || xbox_audio_driver[0] == '\0')
+            xbox_audio_driver = "dummy";
+        SDL_SetHint(SDL_HINT_AUDIO_DRIVER, xbox_audio_driver);
+#endif
         if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             fprintf(stderr, "audio: SDL_InitSubSystem failed: %s\n", SDL_GetError());
             return;
@@ -826,6 +710,11 @@ void AXInit(void) {
             fprintf(stderr, "audio: SDL_OpenAudioDeviceStream failed: %s\n", SDL_GetError());
             return;
         }
+#ifdef MELEE_XBOX_UWP
+        s_xbox_native_audio = strcmp(SDL_GetCurrentAudioDriver(), "dummy") == 0;
+        if (s_xbox_native_audio)
+            pc_xbox_audio_start(s_master_volume);
+#endif
         SDL_ResumeAudioStreamDevice(s_stream);
     }
 }
@@ -835,6 +724,10 @@ void AXQuit(void) {
         SDL_DestroyAudioStream(s_stream);
         s_stream = NULL;
     }
+#ifdef MELEE_XBOX_UWP
+    s_xbox_native_audio = false;
+    pc_xbox_audio_stop();
+#endif
 }
 
 void AXRegisterCallback(void (*callback)()) {
@@ -851,7 +744,6 @@ AXVPB* AXAcquireVoice(u32 priority, void (*callback)(void*), u32 userContext) {
         }
     }
     if (pick == NULL) {
-        /* Steal the lowest-priority voice below the request, like AX. */
         for (int i = 0; i < AX_VOICES; i++) {
             Voice* v = &s_voices[i];
             if ((u32)v->vpb.priority < priority &&
@@ -892,12 +784,6 @@ void AXFreeVoice(AXVPB* p) {
     }
 }
 
-/* Every setter below brackets its body with audio_lock, protecting
- * parameter blocks against concurrent access with render_frame() on SDL's audio
- * thread and between game/DVD worker threads. Using a dedicated audio mutex
- * decouples audio processing from the global OS interrupt mutex (s_intr_mutex),
- * ensuring controller reads, alarms, and GX draw commands never stall on audio.
- * The mutex is recursive, so callers inside s_frame_callback safely re-enter it. */
 void AXSetVoicePriority(AXVPB* p, u32 priority) {
     audio_lock();
     Voice* v = (Voice*)p;
@@ -945,7 +831,6 @@ void AXSetVoiceVeDelta(AXVPB* p, s16 delta) {
     audio_unlock();
 }
 
-/* Big-endian block from disc. */
 void AXSetVoiceAddr(AXVPB* p, AXPBADDR* addr) {
     audio_lock();
     Voice* v = (Voice*)p;
@@ -956,11 +841,6 @@ void AXSetVoiceAddr(AXVPB* p, AXPBADDR* addr) {
     v->end_addr = addr32(be16(addr->endAddressHi), be16(addr->endAddressLo));
     v->cur_addr = addr32(be16(addr->currentAddressHi), be16(addr->currentAddressLo));
 
-    /* Every voice address is treated as an ARAM offset by next_sample(), which
-     * indexes s_aram[cur_addr >> 1]. A voice whose samples are NOT in ARAM
-     * would read outside that buffer and fall silent -- which is the shape of
-     * "some sound effects don't play". Report any address past the end of
-     * ARAM (nibble-addressed, so the limit is 2x the byte size). */
     {
         static int log_cached = -1;
         const u32 limit = (u32)(PC_ARAM_SIZE * 2u);
@@ -1025,7 +905,6 @@ void AXSetVoiceCurrentAddr(AXVPB* p, u32 addr) {
     audio_unlock();
 }
 
-/* Big-endian block from disc. */
 void AXSetVoiceAdpcm(AXVPB* p, AXPBADPCM* a) {
     audio_lock();
     Voice* v = (Voice*)p;
@@ -1044,7 +923,6 @@ void AXSetVoiceAdpcm(AXVPB* p, AXPBADPCM* a) {
     audio_unlock();
 }
 
-/* Big-endian block from disc. */
 void AXSetVoiceAdpcmLoop(AXVPB* p, AXPBADPCMLOOP* l) {
     audio_lock();
     p->pb.adpcmLoop.loop_pred_scale = be16(l->loop_pred_scale);
@@ -1053,27 +931,6 @@ void AXSetVoiceAdpcmLoop(AXVPB* p, AXPBADPCMLOOP* l) {
     audio_unlock();
 }
 
-/* AX_MAX_RATIO is not a guess: retail AXSetVoiceSrcRatio does exactly this,
- *     r = 65536.0f * ratio;
- *     if (r > 0x40000) { r = 0x40000; }
- * (dolphin/src/dolphin/ax/AXVPB.c:1240-1243 in the SDK tree vendored by
- * melee-native). 4.0 is the ceiling of AX's 4-tap sample-rate converter, so
- * a ratio above it is not a pitch the hardware would have played either --
- * saturating is the faithful behaviour, not a new policy.
- *
- * It also has to be bounded for a reason retail did not have: mix_voice
- * decodes ratio/65536 source samples per output sample in software, so at
- * the nominal-1.0-byte-swapped value of 65535.0 one 5ms frame costs 58ms of
- * CPU (measured: 20 frames = 100ms of audio took 1160ms). The SDL pull
- * callback then never refills the stream again and ALL audio stops for the
- * rest of the session while the game runs on. The cap additionally keeps
- * `v->frac += ratio` from wrapping u32, which would silently slow a voice so
- * it never reached its end address.
- *
- * Retail clamps only in AXSetVoiceSrcRatio, because the DSP does fixed work
- * regardless of what a raw AXSetVoiceSrc block contains. Both paths are
- * clamped here since the software mixer does not have that luxury; it is
- * reported so the difference is never silent. */
 #define AX_MAX_RATIO 0x40000u /* 4.0 in 16.16 */
 
 static u32 clamp_ratio(u32 ratio) {
@@ -1088,32 +945,12 @@ static u32 clamp_ratio(u32 ratio) {
     return ratio;
 }
 
-/* The 16.16 ratio is held in the block's two halves in field order
- * (ratioHi = high 16 bits), not as one host u32: reading it with a memcpy
- * gives (Lo << 16) | Hi, which for the synth's nominal 1.0 is a ratio of 1 --
- * one source sample every 65536 output samples, so the voice is inaudible and
- * never reaches its end address, and the voice pool fills with stuck voices
- * until no sound effect can be started at all. */
 void AXSetVoiceSrc(AXVPB* p, AXPBSRC* s) {
     audio_lock();
     Voice* v = (Voice*)p;
     int i;
 
     set_addr(&p->pb.src.ratioHi, &p->pb.src.ratioLo, clamp_ratio(addr32(s->ratioHi, s->ratioLo)));
-    /* Retail copies all seven u16s of the block and raises
-     * AX_SYNC_FLAG_COPYSRC, so the DSP adopts the supplied SRC phase and FIR
-     * history as well as the ratio (AXVPB.c:1197-1232). currentAddressFrac
-     * is the sub-sample position -- the same unit as the low half of
-     * v->frac -- so it is applied, not ignored. That also means an
-     * AXSetVoiceSrc resets the resampling phase exactly as it does on
-     * hardware, which is why mix_voice's end-of-voice path may preserve
-     * frac: nothing resets it there, the reset arrives with the SRC block
-     * the HPS swap supplies. last_samples is the 4-tap SRC history, which a
-     * 2-point linear interpolator has no equivalent for, so it is mirrored
-     * for the game to read back but not consumed. Melee supplies zeros for
-     * both anyway: synth.c:529 is
-     * `HSD_Synth_80407FD8 = { 1, 0, 0, { 0, 0, 0, 0 } }` and setSrcRatio
-     * (synth.c:533-537) only ever writes the ratio pair. */
     p->pb.src.currentAddressFrac = s->currentAddressFrac;
     for (i = 0; i < 4; i++) {
         p->pb.src.last_samples[i] = s->last_samples[i];
@@ -1124,11 +961,6 @@ void AXSetVoiceSrc(AXVPB* p, AXPBSRC* s) {
 
 void AXSetVoiceSrcRatio(AXVPB* p, float ratio) {
     audio_lock();
-    /* Both ends have to be handled in float, before the cast: converting a
-     * NaN, a negative, or anything >= 65536.0 to u32 is undefined behaviour
-     * (x86-64 cvttss2si yields 0x80000000, i.e. a 32768x ratio). Melee's
-     * pause path legitimately asks for 0, so the bottom is clamped to 0 and
-     * only clamp_ratio caps -- and reports -- the top.  */
     if (!(isfinite(ratio) && ratio > 0.0f)) {
         ratio = 0.0f;
     } else if (ratio > 4.0f) {
@@ -1158,8 +990,6 @@ void AXRegisterAuxBCallback(void (*callback)(void*, void*), void* context) {
     aux_register(&s_auxB, callback, context);
 }
 
-/* ---- AXFX -------------------------------------------------------------- */
-
 void* (*__AXFXAlloc)(size_t) = NULL;
 void (*__AXFXFree)(void*) = NULL;
 
@@ -1180,18 +1010,6 @@ void AXFXSetHooks(void* (*alloc_hook)(size_t), void (*free_hook)(void*)) {
     __AXFXFree = free_hook;
 }
 
-/* A Schroeder reverberator over the work area the SDK structure already
- * describes: three comb filters with a damping one-pole in the feedback,
- * followed by three all-pass sections, per channel. The SDK's own network is
- * larger, but the parameters Melee sets (coloration, mix, time, damping,
- * pre-delay, crosstalk) map onto this one directly and the audible result is
- * stage reverb rather than silence.
- * ponytail: 3+3 sections per channel, not the SDK's 9; raise if a stage
- * sounds obviously thin.
- *
- * L and R only: the surround input is always zero (see AuxBus), and a zero
- * input into zeroed lines produces exactly zero, so the third network that
- * used to run here only ever computed silence. */
 #define AXFX_CHANNELS 2
 
 static const long kCombLen[AXFX_CHANNELS][3] = {
@@ -1203,9 +1021,6 @@ static const long kAllPassLen[AXFX_CHANNELS][3] = {
     {449, 157, 59},
 };
 
-/* The delay lines come from the host heap, not AXFXAllocFunction: the game's
- * AXFX heap is a fixed ~GameCube-sized scratch block (AXDriverAlloc asserts
- * against axfxmaxsize) and these lines are far larger than it. */
 static bool axfx_line_alloc(struct AXFX_REVHI_DELAYLINE* d, long length) {
     d->inputs = calloc((size_t)length, sizeof(float));
     if (d->inputs == NULL) {
@@ -1244,7 +1059,6 @@ static int axfx_reverb_init(struct AXFX_REVHI_WORK* rv, float coloration, float 
             if (!axfx_line_alloc(&rv->C[ch * 3 + k], kCombLen[ch][k]) ||
                 !axfx_line_alloc(&rv->AP[ch * 3 + k], kAllPassLen[ch][k]))
             {
-                /* All lines or none: axfx_reverb_run checks only the first. */
                 axfx_reverb_shutdown(rv);
                 return 0;
             }
@@ -1255,7 +1069,6 @@ static int axfx_reverb_init(struct AXFX_REVHI_WORK* rv, float coloration, float 
     }
     for (ch = 0; ch < AXFX_CHANNELS; ch++) {
         for (k = 0; k < 3; k++) {
-            /* -60 dB after `time` seconds for a line of this length. */
             rv->combCoef[ch * 3 + k] =
                 powf(10.0f, -3.0f * (float)kCombLen[ch][k] / (time * AX_RATE));
         }
@@ -1275,8 +1088,6 @@ static void axfx_reverb_run(struct AXFX_REVHI_WORK* rv, struct AXFX_BUFFERUPDATE
     float ap = rv->allPassCoeff;
     float wet = rv->level;
 
-    /* Unregistered before shutdown frees the lines, and init allocates all
-     * of them or none, so this one check stands for every line. */
     if (rv->C[0].inputs == NULL) {
         return;
     }
@@ -1289,7 +1100,6 @@ static void axfx_reverb_run(struct AXFX_REVHI_WORK* rv, struct AXFX_BUFFERUPDATE
     for (i = 0; i < AX_FRAME; i++) {
         in[0][i] = (float)chan[0][i];
         in[1][i] = (float)chan[1][i];
-        /* Crosstalk bleeds each side into the other before the network. */
         if (rv->crosstalk > 0.0f) {
             float c = rv->crosstalk;
             float l = in[0][i] + c * in[1][i];
@@ -1298,10 +1108,6 @@ static void axfx_reverb_run(struct AXFX_REVHI_WORK* rv, struct AXFX_BUFFERUPDATE
             in[1][i] = r;
         }
     }
-    /* Past the crosstalk the channels are independent, so each runs its whole
-     * frame with the line positions and filter state held in locals. In a
-     * line inPoint always equals outPoint: the sample read out is replaced by
-     * the one written in. */
     for (ch = 0; ch < AXFX_CHANNELS; ch++) {
         struct AXFX_REVHI_DELAYLINE* line[6];
         float* buf[6];
@@ -1384,8 +1190,6 @@ void AXFXReverbHiCallback(struct AXFX_BUFFERUPDATE* b, struct AXFX_REVERBHI* r) 
     }
 }
 
-/* REVERBSTD keeps its own (smaller) work area; drive the same network from a
- * side allocation so both aux slots behave. */
 static struct AXFX_REVHI_WORK s_revstd_work[2];
 static struct AXFX_REVERBSTD* s_revstd_owner[2];
 
@@ -1460,9 +1264,6 @@ void AXFXReverbStdCallback(struct AXFX_BUFFERUPDATE* b, struct AXFX_REVERBSTD* r
     }
 }
 
-/* Chorus is not selected by Melee (lbaudio_ax.c puts REVERB_STD on aux A and
- * DELAY on aux B); leaving the bus untouched passes the send through dry.
- * ponytail: implement if a stage turns out to select it. */
 int AXFXChorusInit(struct AXFX_CHORUS* c) {
     (void)c;
     return 1;
@@ -1480,12 +1281,6 @@ void AXFXChorusCallback(struct AXFX_BUFFERUPDATE* b, struct AXFX_CHORUS* c) {
     (void)c;
 }
 
-/* Delay: one circular line per channel. `delay[i]` is milliseconds,
- * `feedback[i]` and `output[i]` are percentages -- the values the driver
- * defaults to are 260/310/6 ms at 24% feedback and 35% output. State lives in
- * the SDK structure's own currentSize/currentPos/left/right/sur fields; the
- * lines come from the host heap for the same reason the reverb's do. Like the
- * reverb it runs L and R only; `sur` stays NULL. */
 int AXFXDelayShutdown(struct AXFX_DELAY* d) {
     if (d == NULL) {
         return 1;
@@ -1568,10 +1363,6 @@ void AXFXDelayCallback(struct AXFX_BUFFERUPDATE* b, struct AXFX_DELAY* d) {
     }
 }
 
-/* The longest a sample can take to reach the effect's output, which is how
- * long run_aux must see silence before it may conclude the effect is quiet.
- * Reverb: the longest comb, then the all-passes, which are plain delays when
- * coloration is 0. Chorus passes its input straight through. */
 static int32_t axfx_longest_path(void (*cb)(void*, void*), void* ctx) {
     int32_t longest = 0;
     int c, k;
@@ -1590,10 +1381,6 @@ static int32_t axfx_longest_path(void (*cb)(void*, void*), void* ctx) {
     return longest;
 }
 
-/* AI: the DTK stream is unused -- Melee's music is HPS played through AX
- * voices, and HSD_SynthStreamSetVolume() scales those voices itself via
- * updateAllVolume(). Routing this onto the master gain faded every sound
- * effect out with the music. */
 void AIInit(u8* stack) {
     (void)stack;
 }

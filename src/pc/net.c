@@ -48,6 +48,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <process.h>
+#endif
 #if !defined(_WIN32)
 #include <poll.h>
 #endif
@@ -1924,7 +1927,7 @@ void pc_net_disconnect(void) {
 
 /* MELEE_NET_EXIT_AFTER_FRAMES=n (tools/net_test.py): the instance that reaches
  * n first sends BYE, and the other one is a frame or two behind (the clocks
- * differ by the time offset), so its own check would never fire — it would sit
+ * differ by the time offset), so its own check would never fire and it would sit
  * at the title until the harness killed it. A BYE this close to the target ends
  * the test as done; a BYE for a real reason still logs DESYNC etc. first. */
 static int32_t s_exit_after; /* 0 = knob unset */
@@ -2076,7 +2079,7 @@ static bool connect_impl(
     /* Ask the network for expedited forwarding (DSCP EF / 46): low-latency
      * queueing where the path honours it, harmless where it does not. */
 #if defined(_WIN32)
-    /* ponytail: Windows ignores IP_TOS for DSCP; real marking there needs the
+    /* Windows ignores IP_TOS for DSCP; real marking there needs the
      * qWAVE API (QOSAddSocketToFlow). Skipped in the prototype. */
 #else
     {
@@ -2139,7 +2142,11 @@ static bool connect_impl(
     sim_env(bind_port);
     /* The host names the session; the guest takes it from the first packet. */
     net.session = net.local == 0 ?
+#if defined(MELEE_XBOX_UWP)
+                      (uint32_t)(SDL_GetPerformanceCounter() ^ (uint64_t)GetCurrentProcessId() << 20) | 1u :
+#else
                       (uint32_t)(SDL_GetPerformanceCounter() ^ (uint64_t)getpid() << 20) | 1u :
+#endif
                       0;
     net.seed = seed;
     if (seed != 0) {
@@ -2708,7 +2715,7 @@ static bool resim_prepare(int32_t f) {
     }
     PADStatus* head = unconsume();
     if (head == NULL) {
-        /* ponytail: the pad queue is full (a hitch queued several samples
+        /* the pad queue is full (a hitch queued several samples
          * during the rollback) and the game reads the queue head directly
          * through HSD_PadRenewMasterStatus (controller.c), not a pointer we
          * own, so a private re-run buffer would never be read. This re-run

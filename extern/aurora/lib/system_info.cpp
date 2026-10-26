@@ -4,16 +4,20 @@
 #if _WIN32
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 #include <combaseapi.h>
 #include <wbemidl.h>
 #include <comutil.h>
+#endif
 #include <dxgi.h>
 #include <wrl/client.h>
 
 template <typename T>
 using ComPtr = Microsoft::WRL::ComPtr<T>;
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 typedef LONG NTSTATUS, *PNTSTATUS;
 extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOEXW lpVersionInformation);
+#endif
 #elif __APPLE__
 #include "sys/sysctl.h"
 #elif linux
@@ -54,10 +58,6 @@ void log_system_information() {
 }
 
 #if _WIN32
-struct ComGuard {
-  ~ComGuard() { CoUninitialize(); }
-};
-
 static std::string wideStringToUtf8(std::wstring_view str) {
   const auto size =
       WideCharToMultiByte(CP_UTF8, 0, str.data(), static_cast<int>(str.size()), nullptr, 0, nullptr, nullptr);
@@ -70,6 +70,11 @@ static std::string wideStringToUtf8(std::wstring_view str) {
 
   return result;
 }
+
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+struct ComGuard {
+  ~ComGuard() { CoUninitialize(); }
+};
 
 std::string GetCpuModel() {
   // Good fucking lord Microsoft, what the fuck is this?
@@ -172,6 +177,9 @@ std::string GetCpuModel() {
 
   return result;
 }
+#else
+std::string GetCpuModel() { return Unknown; }
+#endif
 
 uint64_t GetMemoryAmount() {
   MEMORYSTATUSEX status;
@@ -182,6 +190,7 @@ uint64_t GetMemoryAmount() {
 }
 
 std::string GetOSVersion() {
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
   RTL_OSVERSIONINFOEXW info = {};
   info.dwOSVersionInfoSize = sizeof(info);
   auto result = RtlGetVersion(&info);
@@ -191,6 +200,9 @@ std::string GetOSVersion() {
   }
 
   return fmt::format("Microsoft Windows {}.{} build {}", info.dwMajorVersion, info.dwMinorVersion, info.dwBuildNumber);
+#else
+  return "Microsoft Windows UWP";
+#endif
 }
 
 static void LogGpus() {

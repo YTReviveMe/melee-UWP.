@@ -3,6 +3,7 @@
 #include "disc_open.h"
 #include <nod.h>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -16,14 +17,6 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #define fsync _commit
-#if defined(_MSC_VER)
-static inline int mkstemp(char* tmpl) {
-    char* name = _mktemp(tmpl);
-    if (!name)
-        return -1;
-    return _open(name, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY, _S_IREAD | _S_IWRITE);
-}
-#endif
 #else
 #include <unistd.h>
 #endif
@@ -239,7 +232,12 @@ static bool is_content_uri(const std::string& path) {
 
 DiscInfo inspect_disc(const std::string& path) {
     std::error_code ec;
-    if (path.empty() || (!is_content_uri(path) && !std::filesystem::is_regular_file(path, ec)))
+#ifdef MELEE_XBOX_UWP
+    const auto native_path = std::filesystem::u8path(path);
+#else
+    const std::filesystem::path native_path(path);
+#endif
+    if (path.empty() || (!is_content_uri(path) && !std::filesystem::is_regular_file(native_path, ec)))
         return {false, "Disc image is missing or cannot be accessed. Choose a disc to continue."};
     auto disc = open_disc(path);
     if (!disc)
@@ -423,9 +421,21 @@ Preferences load_preferences(const std::filesystem::path& path) {
 
 bool save_preferences(
     const std::filesystem::path& path, const Preferences& prefs, std::string& error) {
-    // A sibling temporary file keeps replacement atomic on the preference filesystem.
-    std::string pattern = path.string() + ".XXXXXX";
-    int fd = mkstemp(pattern.data());
+    std::string pattern;
+    int fd = -1;
+#ifdef _WIN32
+    const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        pattern = path.string() + "." + std::to_string(timestamp + attempt) + ".tmp";
+        fd = _open(pattern.c_str(), _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+        if (fd >= 0 || errno != EEXIST)
+            break;
+    }
+#else
+    pattern = path.string() + ".XXXXXX";
+    fd = mkstemp(pattern.data());
+#endif
     if (fd < 0) {
         error = "Could not save launcher settings: " + std::string(std::strerror(errno));
         return false;

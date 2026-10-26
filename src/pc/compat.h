@@ -6,6 +6,10 @@
 #include <sys/types.h>
 #include <stdint.h>
 #include <stddef.h>
+#if defined(MELEE_XBOX_UWP)
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
 #include <math.h>
 
 #include "pc/disc.h"

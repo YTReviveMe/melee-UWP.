@@ -3,6 +3,7 @@
 #include <aurora/performance.h>
 #include "android_performance.hpp"
 #include <cmath>
+#include <cstdlib>
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/resources.hpp"
@@ -567,6 +568,13 @@ AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config)
 void aurora_shutdown() {
   aurora_report_frame_work(0, 0);
   aurora::shutdown();
+}
+void aurora_set_user_path(const char* path) {
+  if (!path) return;
+  char* replacement = strdup(path);
+  if (!replacement) return;
+  std::free(const_cast<char*>(aurora::g_config.userPath));
+  aurora::g_config.userPath = replacement;
 }
 const AuroraEvent* aurora_update() { return aurora::update(); }
 bool aurora_begin_frame() { return aurora::begin_frame(); }

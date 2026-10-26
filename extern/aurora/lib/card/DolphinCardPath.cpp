@@ -10,6 +10,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 #include <winreg.h>
 #include <shlobj.h>
 #if defined(__has_include)
@@ -18,12 +19,13 @@
 #endif
 #endif
 #endif
+#endif
 
 #include <SDL3/SDL_filesystem.h>
 
 #include "../internal.hpp"
 
-#if WIN32
+#if WIN32 && WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 namespace {
   std::string ConvertWideToANSI(const std::wstring& wstr) {
     int count = WideCharToMultiByte(CP_ACP, 0, wstr.c_str(), wstr.length(), NULL, 0, NULL, NULL);
@@ -37,14 +39,8 @@ namespace {
 namespace aurora::card {
 aurora::Module Log("aurora::card");
 
-#if WIN32
-
-#if WINDOWS_STORE
-using namespace Windows::Storage;
-#endif
-
+#if WIN32 && WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool isGciFolder) {
-#if !WINDOWS_STORE
   /* Detect where the User directory is. There are two different cases
    * 1. HKCU\Software\Dolphin Emulator\UserConfigPath exists
    *    -> Use this as the user directory path
@@ -78,11 +74,6 @@ std::string ResolveDolphinCardPath(ECardSlot slot, const char* regionCode, bool 
     Log.error("Unable to find Dolphin Emulator user directory!");
     return {};
   }
-#else
-  StorageFolder ^ localFolder = ApplicationData::Current->LocalFolder;
-  std::string path(localFolder->Path->Data());
-#endif
-
   std::string path;
   if (isGciFolder) {
     path = fmt::format("{}/GC/{}/Card {}", ConvertWideToANSI(w_path), regionCode, slot == ECardSlot::SlotA ? 'A' : 'B');

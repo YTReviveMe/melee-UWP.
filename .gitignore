@@ -33,7 +33,6 @@ platforms/android/release-signing.env
 vkd3d-proton.cache*
 steam_appid.txt
 
-# Agent working notes from the netcode batch stay local.
 local/
 
 # MELEE_LOG_FILE defaults to this beside the executable on Windows, so a run

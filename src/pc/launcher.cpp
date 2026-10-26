@@ -16,9 +16,6 @@
 #include <aurora/gfx.h>
 #include <aurora/rmlui.hpp>
 #include <aurora/input.hpp>
-/* TargetConditionals.h defines TARGET_OS_IPHONE on macOS too, as 0, so this
- * has to test its value: defined() alone pulled the iOS-only dialog into the
- * macOS build and left the link short a symbol. */
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -31,11 +28,17 @@
 #include <chrono>
 #include <random>
 #include <cstdlib>
+#include <exception>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
+#ifdef MELEE_XBOX_UWP
+#include "../../platforms/xbox/storage.hpp"
+#include "../../platforms/xbox/storage_api.h"
+#endif
 
 namespace {
 launcher::Preferences prefs;
@@ -56,9 +59,6 @@ const char* display_mode() {
 #endif
 }
 
-/* Aurora's input router no longer feeds RmlUi itself: the host registers a
- * layer that forwards events to aurora::rmlui::process_input. Without it the
- * launcher and F1 menu get no mouse, touch or keyboard input at all. */
 void ensure_rmlui_input_layer() {
     static aurora::input::LayerId layer = aurora::input::kInvalidLayerId;
     if (layer != aurora::input::kInvalidLayerId)
@@ -114,8 +114,6 @@ bool change_online(Rml::Event& event) {
 }
 
 const char* filter_name(int mode) {
-    // Mode 0 is the plain present blit -- no effect at all, so it is the
-    // "off" setting; the bilinear filter it uses is just the scaler.
     static const char* const names[] = {"Off", "Area sampling", "CRT scanlines", "Vibrant"};
     return names[mode & 3];
 }
@@ -133,12 +131,10 @@ const char* backend_name(int mode) {
 
 bool load_menu_fonts(const std::filesystem::path& resources) {
     if (!Rml::LoadFontFace((resources / "font.ttf").string(), true)) {
-        SDL_Log("Menus: could not load font from %s", resources.c_str());
+        SDL_Log("Menus: could not load font from %s", resources.string().c_str());
         return false;
     }
     Rml::LoadFontFace((resources / "font-bold.ttf").string());
-    /* The menus' face (Noto Sans SemiCondensed, cut to Latin), with its
-     * ExtraBold for the plates' names. Liberation covers what it lacks. */
     for (const char* face : {"menu.ttf", "menu-bold.ttf"})
         if (!Rml::LoadFontFace((resources / face).string()))
             SDL_Log("Menus: could not load %s", face);
@@ -148,11 +144,6 @@ bool load_menu_fonts(const std::filesystem::path& resources) {
     return true;
 }
 
-/* The two Direct3D entries only exist on Windows, so elsewhere the cycle goes
- * straight from Auto to Vulkan: offering a backend that can only ever fail
- * over leaves the button showing a label for something the run is not using.
- * ponytail: indices stay identical on every platform so the prefs file and
- * the BACKEND_* mapping below need no per-platform cases. */
 int backend_next(int mode, int direction = 1) {
 #if defined(_WIN32)
     return (mode + direction + 4) % 4;
@@ -176,6 +167,16 @@ std::string resolution_name(float scale) {
 std::string identity(const std::string& path) {
     if (path.rfind("content://", 0) == 0)
         return path;
+#ifdef MELEE_XBOX_UWP
+    std::error_code ec;
+    const auto native = std::filesystem::u8path(path);
+    const auto size = std::filesystem::file_size(native, ec);
+    if (ec) return {};
+    const auto written = std::filesystem::last_write_time(native, ec);
+    if (ec) return {};
+    return path + ":" + std::to_string(size) + ":" +
+           std::to_string(written.time_since_epoch().count());
+#else
     struct stat s = {};
     if (stat(path.c_str(), &s) != 0)
         return {};
@@ -194,10 +195,9 @@ std::string identity(const std::string& path) {
            std::to_string(s.st_mtim.tv_nsec) + ":" + std::to_string(s.st_ctim.tv_sec) + ":" +
            std::to_string(s.st_ctim.tv_nsec);
 #endif
+#endif
 }
 
-// The native dialog can finish after the window closes. Its callback owns a
-// shared state reference and never touches the document or SDL window.
 struct DialogResult {
     std::mutex mutex;
     bool ready = false;
@@ -214,19 +214,10 @@ void dialog_done(void* userdata, const char* const* files, int) {
     (*owner)->ready = true;
 }
 
-/* Aurora compiles the known pipeline configs ahead of use -- the ~12k-config
- * seed on desktop, on Android the ones this device has built before -- on
- * worker threads from startup, or, without workers (Android), in this loop's
- * idle time. Until a config is compiled, every draw that needs it is skipped
- * (issue #46), so the drain finishing before a match is the difference between
- * a match that pops and one that does not. The launcher is the one screen
- * where the player is already waiting; spend it there. */
 static uint32_t pending_pipelines() {
     return aurora_wait_pipelines(0);
 }
 
-/* The platform, as a class on the launcher's <body>: launcher.rcss hides
- * what it has no use for (.no-mobile: the window mode, the keyboard). */
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
 constexpr bool is_mobile = true;
 #else
@@ -237,10 +228,11 @@ constexpr const char* disc_note =
     "Use Choose Disc, or place a disc image in Files > On My iPhone > Melee.";
 #elif defined(__ANDROID__)
 constexpr const char* disc_note = "Use Choose Disc to pick a disc image.";
+#elif defined(MELEE_XBOX_UWP)
+constexpr const char* disc_note = "Choose an image from D:\\developmentfiles\\Melee or a USB drive.";
 #else
 constexpr const char* disc_note = "Drop a disc image here, or use Choose Disc.";
 #endif
-/* Melee colours the menu frame after the entry under the cursor. */
 constexpr const char* main_ids[] = {"play", "choose", "verify", "settings", "discord", "quit"};
 
 class Launcher final : public Rml::EventListener {
@@ -256,18 +248,22 @@ class Launcher final : public Rml::EventListener {
     uint64_t last_identity_check = 0, last_axis = 0, last_axis_x = 0;
     unsigned last_progress = 101;
     std::vector<std::string> focus_ids;
+#ifdef MELEE_XBOX_UWP
+    bool browsing = false;
+    std::vector<std::filesystem::path> storage_roots;
+    std::string storage_scan_error;
+    size_t storage_root = 0, storage_page = 0;
+    std::string storage_top_action = "storage-root";
+    std::filesystem::path storage_directory;
+    melee::xbox::Listing storage_listing;
+#endif
     int result = -2, tab = 0;
     bool update_card_dismissed = false;
     pc::updater::Status last_updater_status = pc::updater::Status::Idle;
     float last_download_progress = -1.0f;
-    // Set once the player asks to play while the pipeline queue is still
-    // draining: the game starts by itself when the queue empties, and a second
-    // press starts it immediately.
     bool shaders_waited = false;
     uint32_t last_pending = 0, last_shader_pending = 0;
-    // The settings row holding the focus, lit as Melee lights its options.
     Rml::Element* current_row = nullptr;
-    // Where the pointer last moved, so only a real move steers the cursor.
     int pointer_x = -1, pointer_y = -1;
 
     Rml::Element* element(const char* id) {
@@ -307,7 +303,6 @@ class Launcher final : public Rml::EventListener {
         auto* e = element("status");
         if (e)
             e->SetClass("error", error);
-        // The disc panel is hidden behind the settings; say it there too.
         if (settings)
             note(value);
     }
@@ -344,9 +339,6 @@ class Launcher final : public Rml::EventListener {
         return false;
     }
     bool in_rows(Rml::Element* e) const { return within(e, "settings-content"); }
-    /* What Up and Down walk through: the main menu's plates, or in the
-     * settings whichever column holds the focus, the categories or the rows
-     * of the open page. */
     std::vector<std::string> column() {
         if (!settings)
             return focus_ids;
@@ -360,8 +352,6 @@ class Launcher final : public Rml::EventListener {
         for (const char* t : main_ids)
             document->SetClass(std::string("theme-") + t, std::strcmp(t, name) == 0);
     }
-    /* The description bar says what the focused thing does, as Melee's does,
-     * and its row lights up. */
     void describe(Rml::Element* e) {
         Rml::Element* row = nullptr;
         Rml::String desc;
@@ -382,24 +372,14 @@ class Launcher final : public Rml::EventListener {
             text("desc", desc);
         if (!e)
             return;
-        // Only one plate lit: the open page's gives way to Back's.
         document->SetClass("on-back", e->GetId() == "back");
         if (!settings) {
             for (const char* t : main_ids)
                 if (e->GetId() == t)
                     set_theme(t);
         } else if (const int i = index_of(tab_ids, e->GetId()); i >= 0 && i != tab)
-            select_tab(i);  // the cursor on a category opens it, as Melee previews
+            select_tab(i);
     }
-    /* A pointer moving onto a control moves the cursor there, so the mouse,
-     * the Quest's laser and the pad share one highlight. Only a move: when the
-     * layout shifts under a resting pointer (a fullscreen toggle, a page
-     * change) RmlUi hovers whatever is now beneath it, and taking that as
-     * pointing pulled the focus away from the keys. Not while a text field
-     * holds the focus either: that would pull it out from under the typing.
-     * Not onto the settings categories: focusing one opens its page, so the
-     * pointer crossing them on its way to the rows flipped pages. They only
-     * light up under it (launcher.rcss), and a click opens one. */
     void hover(Rml::Event& event) {
         const int x = event.GetParameter<int>("mouse_x", -1);
         const int y = event.GetParameter<int>("mouse_y", -1);
@@ -436,8 +416,6 @@ class Launcher final : public Rml::EventListener {
                 focus_ids.begin(), {"update-action", "update-browser", "update-later"});
         }
     }
-    // Opens a page without moving the focus (describe() calls it whenever a
-    // category takes the focus, by keys or by pointer).
     void select_tab(int next) {
         const int count = std::size(tab_ids);
         tab = (next + count) % count;
@@ -458,9 +436,8 @@ class Launcher final : public Rml::EventListener {
             e->ScrollIntoView();
         }
     }
-    // Into the open page's first row (Right or A on a category).
     void enter_rows() {
-        document->UpdateDocument();  // the page's display just changed
+        document->UpdateDocument();
         for (const auto& id : page_focus()) {
             auto* e = element(id.c_str());
             if (shown(e) && !e->IsPseudoClassSet("disabled")) {
@@ -470,8 +447,19 @@ class Launcher final : public Rml::EventListener {
             }
         }
     }
-    // B or Escape: rows to categories, categories to the main menu.
     void back() {
+#ifdef MELEE_XBOX_UWP
+        if (browsing) {
+            if (storage_directory != storage_roots[storage_root]) {
+                storage_directory = storage_directory.parent_path();
+                storage_page = 0;
+                refresh_storage();
+            } else {
+                close_storage();
+            }
+            return;
+        }
+#endif
         if (!settings) {
             if (verification.valid())
                 cancel = true;
@@ -481,6 +469,43 @@ class Launcher final : public Rml::EventListener {
             show_settings(false);
     }
     void focus_step(int direction) {
+#ifdef MELEE_XBOX_UWP
+        if (browsing) {
+            const auto* focus = document->GetContext()->GetFocusElement();
+            const auto id = focus ? focus->GetId() : Rml::String();
+            const size_t visible = std::min<size_t>(8,
+                storage_listing.entries.size() - std::min(storage_page * 8, storage_listing.entries.size()));
+            const bool has_pages = storage_listing.entries.size() > 8;
+            std::string target;
+            if (id == "storage-root" || id == "storage-refresh") {
+                storage_top_action = id;
+                if (direction > 0)
+                    target = visible ? "storage-0" : has_pages ? "storage-next" : "";
+                else
+                    target = has_pages ? "storage-next" : visible ?
+                        "storage-" + std::to_string(visible - 1) : "";
+            } else if (id == "storage-next") {
+                target = direction > 0 ? storage_top_action : visible ?
+                    "storage-" + std::to_string(visible - 1) : storage_top_action;
+            } else if (id.size() == 9 && id.rfind("storage-", 0) == 0 &&
+                       id.back() >= '0' && id.back() <= '7') {
+                const int index = id.back() - '0';
+                const int next = index + direction;
+                target = next < 0 ? storage_top_action :
+                    next >= static_cast<int>(visible) ?
+                        (has_pages ? "storage-next" : storage_top_action) :
+                        "storage-" + std::to_string(next);
+            } else {
+                target = storage_top_action;
+            }
+            if (!target.empty())
+                if (auto* e = element(target.c_str())) {
+                    e->Focus();
+                    e->ScrollIntoView();
+                }
+            return;
+        }
+#endif
         auto* focus = document->GetContext()->GetFocusElement();
         const auto ids = column();
         const int count = static_cast<int>(ids.size());
@@ -502,6 +527,12 @@ class Launcher final : public Rml::EventListener {
         auto* e = document->GetContext()->GetFocusElement();
         if (!e || e == document || e->IsPseudoClassSet("disabled"))
             return;
+#ifdef MELEE_XBOX_UWP
+        if (typing(e)) {
+            SDL_StartTextInput(window);
+            return;
+        }
+#endif
         const auto id = e->GetId();
         if (settings && index_of(tab_ids, id) >= 0) {
             show_tab(index_of(tab_ids, id));
@@ -509,9 +540,23 @@ class Launcher final : public Rml::EventListener {
         } else if (e->GetTagName() == "button" || is_slider(id))
             action(id);
     }
-    /* Left and Right: Melee's arrows. They step a value either way, move a
-     * slider, or cross between the categories and the rows. */
     void horizontal(int direction) {
+#ifdef MELEE_XBOX_UWP
+        if (browsing) {
+            const auto* focus = document->GetContext()->GetFocusElement();
+            const auto id = focus ? focus->GetId() : Rml::String();
+            if (id == "storage-root" || id == "storage-refresh") {
+                storage_top_action = id == "storage-root" ? "storage-refresh" : "storage-root";
+                element(storage_top_action.c_str())->Focus();
+            } else if (id == "storage-next" && storage_listing.entries.size() > 8) {
+                const size_t pages = (storage_listing.entries.size() + 7) / 8;
+                storage_page = (storage_page + pages + (direction > 0 ? 1 : pages - 1)) % pages;
+                refresh_storage();
+                element("storage-next")->Focus();
+            }
+            return;
+        }
+#endif
         auto* focus = document->GetContext()->GetFocusElement();
         if (!focus || focus->IsPseudoClassSet("disabled"))
             return;
@@ -523,11 +568,10 @@ class Launcher final : public Rml::EventListener {
             step_slider(direction);
         else if (focus->IsClassSet("value") && !focus->IsClassSet("action")) {
             if (!cycle(id, direction))
-                action(id);  // two states: either arrow flips it
+                action(id);
         } else if (settings && direction < 0)
             show_tab(tab);
     }
-    /* The settings with more than two values, stepped either way. */
     bool cycle(const std::string& id, int direction) {
         auto wrap = [](int value, int count) { return (value % count + count) % count; };
         if (id == "backend") {
@@ -544,7 +588,7 @@ class Launcher final : public Rml::EventListener {
             prefs.filter_mode = wrap(prefs.filter_mode + direction, 4);
             aurora_set_resampler(static_cast<AuroraSampler>(prefs.filter_mode));
         } else if (id == "net-delay")
-            prefs.net_delay = wrap(prefs.net_delay + 1 + direction, 6) - 1;  // Auto, 0-4
+            prefs.net_delay = wrap(prefs.net_delay + 1 + direction, 6) - 1;
         else
             return false;
         save();
@@ -560,8 +604,6 @@ class Launcher final : public Rml::EventListener {
         return id == "volume" || id == "resolution" || id == "scale" || id == "music-volume" ||
                id == "sfx-volume";
     }
-    // Writing a slider's value fires Change; `quiet` keeps that from looping
-    // back into another save.
     void refresh_settings() {
         if (!settings)
             return;
@@ -612,8 +654,6 @@ class Launcher final : public Rml::EventListener {
         notice();
         quiet = false;
     }
-    // The line under the settings rows, shown only while it has something
-    // to say (settings save as they change, so that goes without saying).
     void note(const std::string& value) {
         text("settings-status", value);
         if (auto* e = element("settings-status"))
@@ -637,7 +677,6 @@ class Launcher final : public Rml::EventListener {
         controls();
         element("settings")->Focus();
     }
-    // Left/right on a slider.
     void step_slider(int direction) {
         auto* focus = document->GetContext()->GetFocusElement();
         if (!focus)
@@ -659,8 +698,6 @@ class Launcher final : public Rml::EventListener {
         refresh_settings();
         save();
     }
-    /* Open the selected disc and leave for the game. False when the disc will
-     * not open, in which case the status line says why and we stay here. */
     bool begin_game() {
         auto check = launcher::inspect_disc(prefs.disc);
         if (!check.supported) {
@@ -680,14 +717,117 @@ class Launcher final : public Rml::EventListener {
         return true;
     }
     void inspect(const std::string& path) {
+#ifdef MELEE_XBOX_UWP
+        pending_path = path;
+#else
         pending_path =
             (path.rfind("content://", 0) == 0) ? path : std::filesystem::absolute(path).string();
+#endif
         status("Checking disc image...");
         inspection =
             std::async(std::launch::async, [path] { return launcher::inspect_disc(path); });
         controls();
     }
+#ifdef MELEE_XBOX_UWP
+    void refresh_storage() {
+        if (storage_roots.empty()) return;
+        storage_listing = melee::xbox::list_directory(
+            storage_roots[storage_root], storage_directory);
+        text("storage-location", melee::xbox::utf8_path(storage_directory));
+        text("storage-root", storage_root == 0 ?
+             (storage_roots.size() > 1 ? "Internal D:  |  switch to USB" : "Internal D:  |  no USB found") :
+             "USB " + std::to_string(storage_root) + "  |  switch device");
+        text("storage-status", !storage_scan_error.empty() ? storage_scan_error :
+             storage_listing.error.empty() ?
+             (storage_listing.entries.empty() ?
+                  "No disc images or folders here. Left/Right choose an action; B closes." :
+                  "Left/Right choose a top action; Down browses files; B goes up or closes.") :
+             storage_listing.error);
+        const size_t pages = (storage_listing.entries.size() + 7) / 8;
+        enabled("storage-next", pages > 1);
+        if (pages > 1)
+            text("storage-next", "Page " + std::to_string(storage_page + 1) + "/" +
+                 std::to_string(pages) + "  |  A next, Left previous");
+        for (size_t i = 0; i < 8; ++i) {
+            const std::string id = "storage-" + std::to_string(i);
+            const size_t index = storage_page * 8 + i;
+            const bool visible = index < storage_listing.entries.size();
+            auto* button = element(id.c_str());
+            button->SetProperty("display", visible ? "block" : "none");
+            if (visible) {
+                const auto& entry = storage_listing.entries[index];
+                text(id.c_str(), std::string(entry.directory ? "[Folder] " : "[Disc] ") +
+                     melee::xbox::utf8_path(entry.path.filename()));
+            }
+        }
+        element(storage_top_action.c_str())->Focus();
+    }
+    void close_storage() {
+        browsing = false;
+        document->SetClass("in-storage", false);
+        element("choose")->Focus();
+    }
+    void open_storage() {
+        storage_scan_error.clear();
+        try {
+            storage_roots = melee::xbox::storage_roots();
+        } catch (const std::exception& e) {
+            storage_roots = {melee::xbox::internal_root()};
+            storage_scan_error = "USB scan failed: " + std::string(e.what());
+            SDL_Log("USB scan failed: %s", e.what());
+        }
+        storage_root = 0;
+        for (size_t i = 1; i < storage_roots.size(); ++i)
+            if (melee::xbox::is_within(storage_roots[i], melee::xbox::active_root()))
+                storage_root = i;
+        auto setup = melee::xbox::setup_storage(storage_roots[storage_root], storage_root == 0);
+        storage_directory = setup.directory;
+        if (!setup.error.empty())
+            storage_scan_error = setup.error;
+        storage_page = 0;
+        storage_top_action = "storage-root";
+        browsing = true;
+        document->SetClass("in-storage", true);
+        refresh_storage();
+    }
+    void change_storage_root() {
+        if (storage_roots.empty()) return;
+        storage_root = (storage_root + 1) % storage_roots.size();
+        auto setup = melee::xbox::setup_storage(storage_roots[storage_root], storage_root == 0);
+        storage_directory = setup.directory;
+        storage_scan_error = setup.error;
+        storage_page = 0;
+        storage_top_action = "storage-root";
+        refresh_storage();
+    }
+#endif
     void action(const std::string& id, int direction = 1) {
+#ifdef MELEE_XBOX_UWP
+        if (browsing) {
+            if (id == "storage-root") change_storage_root();
+            else if (id == "storage-refresh") open_storage();
+            else if (id == "storage-next" && storage_listing.entries.size() > 8) {
+                storage_page = (storage_page + 1) % ((storage_listing.entries.size() + 7) / 8);
+                refresh_storage();
+                element("storage-next")->Focus();
+            } else if (id.rfind("storage-", 0) == 0 && id.size() == 9 &&
+                       id.back() >= '0' && id.back() <= '7') {
+                const size_t index = storage_page * 8 + size_t(id.back() - '0');
+                if (index < storage_listing.entries.size()) {
+                    const auto entry = storage_listing.entries[index];
+                    if (entry.directory) {
+                        storage_directory = entry.path;
+                        storage_page = 0;
+                        refresh_storage();
+                    } else if (melee::xbox::is_within(storage_roots[storage_root], entry.path)) {
+                        close_storage();
+                        inspect(melee::xbox::utf8_path(entry.path));
+                    }
+                }
+            }
+            return;
+        }
+#endif
         if (id == "export-logs") {
             pc_android_export_logs();
             return;
@@ -718,6 +858,9 @@ class Launcher final : public Rml::EventListener {
         if (busy())
             return;
         if (id == "choose") {
+#ifdef MELEE_XBOX_UWP
+            open_storage();
+#else
             static const SDL_DialogFileFilter filters[] = {
                 {"GameCube disc images", "iso;gcm;ciso;rvz;gcz;wia"}, {"All files", "*"}};
             dialog = std::make_shared<DialogResult>();
@@ -729,10 +872,8 @@ class Launcher final : public Rml::EventListener {
                 filters, 2, prefs.disc.empty() ? nullptr : prefs.disc.c_str(), false);
 #endif
             controls();
+#endif
         } else if (id == "play" && supported) {
-            /* The pipeline queue may still be draining. Take the wait here,
-             * where the player is already looking at a screen, rather than
-             * during the first match; pressing Play again skips it. */
             if (const uint32_t pending = pending_pipelines(); !shaders_waited && pending > 0) {
                 SDL_Log("Launcher: Play waits for %u pipelines", pending);
                 shaders_waited = true;
@@ -855,13 +996,11 @@ class Launcher final : public Rml::EventListener {
             refresh_settings();
             element("reverb")->Focus();
         } else if (id == "performance") {
-            // The cheapest settings for a slow GPU or CPU, in one press.
             prefs.render_scale = 1;
             prefs.msaa = 1;
             prefs.anisotropy = 1;
             prefs.reverb = false;
 #if defined(__ANDROID__)
-            // Mailbox reduces presentation stalls; simulation still paces to 60 Hz.
             if (!std::getenv("MELEE_VSYNC")) {
                 prefs.vsync = false;
                 aurora_enable_vsync(false);
@@ -919,12 +1058,8 @@ public:
         document->AddEventListener(Rml::EventId::Click, this);
         document->AddEventListener(Rml::EventId::Keydown, this);
         document->AddEventListener(Rml::EventId::Change, this);
-        // Focus does not bubble; the capture pass still reaches the document.
         document->AddEventListener(Rml::EventId::Focus, this, true);
         document->AddEventListener(Rml::EventId::Mousemove, this);
-        /* MELEE_LAUNCHER_PLATFORM=mobile lays the launcher out as
-         * another platform does, to check a phone's from a desktop. Only the
-         * layout follows it. */
         const char* platform = std::getenv("MELEE_LAUNCHER_PLATFORM");
         if (is_mobile || (platform && std::strcmp(platform, "mobile") == 0))
             document->SetClass("mobile", true);
@@ -1013,7 +1148,6 @@ public:
                 focus_step(key == Rml::Input::KI_UP ? -1 : 1);
                 event.StopPropagation();
             } else if (key == Rml::Input::KI_RETURN) {
-                // Stopping it here also stops RmlUi's own click on Enter.
                 auto* focus = document->GetContext()->GetFocusElement();
                 if (focus && (is_slider(focus->GetId()) ||
                                  (settings && index_of(tab_ids, focus->GetId()) >= 0)))
@@ -1022,7 +1156,6 @@ public:
                     event.StopPropagation();
                 }
             } else if (key == Rml::Input::KI_LEFT || key == Rml::Input::KI_RIGHT) {
-                // A text field keeps its arrows for the caret.
                 if (!typing(document->GetContext()->GetFocusElement())) {
                     horizontal(key == Rml::Input::KI_LEFT ? -1 : 1);
                     event.StopPropagation();
@@ -1039,7 +1172,7 @@ public:
         if (!initial_error.empty())
             status(initial_error, true);
         while (result == -2) {
-            if (pc_exit_requested) { /* SIGINT/SIGTERM, src/pc/main.c */
+            if (pc_exit_requested) {
                 result = 0;
                 cancel = true;
                 break;
@@ -1111,6 +1244,26 @@ public:
             {
                 auto info = inspection.get();
                 if (info.supported) {
+#ifdef MELEE_XBOX_UWP
+                    const auto disc_path = std::filesystem::u8path(pending_path);
+                    const bool internal = melee::xbox::is_within(melee::xbox::internal_root(), disc_path);
+                    const auto root = internal ? melee::xbox::internal_root() : disc_path.root_path();
+                    const auto setup = melee::xbox::activate_storage(root, internal);
+                    if (!setup.error.empty()) {
+                        supported = false;
+                        status(setup.error, true);
+                        controls();
+                        element("choose")->Focus();
+                        continue;
+                    }
+                    config_path = setup.directory / "settings" / "launcher.cfg";
+                    if (std::filesystem::exists(config_path))
+                        prefs = launcher::load_preferences(config_path);
+                    aurora_set_user_path(melee_xbox_settings_directory());
+                    pc_net_set_input_delay(prefs.net_delay);
+                    aurora::rmlui::set_ui_scale(prefs.scale);
+                    aurora_set_resampler(static_cast<AuroraSampler>(prefs.filter_mode));
+#endif
                     prefs.disc = pending_path;
                     supported = true;
                     selected_identity = identity(prefs.disc);
@@ -1125,7 +1278,12 @@ public:
                         if (auto col = display_name.find_last_of(':'); col != std::string::npos)
                             display_name = display_name.substr(col + 1);
                     } else {
+#ifdef MELEE_XBOX_UWP
+                        display_name = melee::xbox::utf8_path(
+                            std::filesystem::u8path(prefs.disc).filename());
+#else
                         display_name = std::filesystem::path(prefs.disc).filename().string();
+#endif
                     }
                     text("disc-name", display_name);
                     text("disc-path", prefs.disc);
@@ -1263,7 +1421,7 @@ public:
                 if (pending == 0) {
                     SDL_Log("Launcher: pipelines built, starting the game");
                     shaders_waited = false;
-                    begin_game(); /* reports its own failure in the status line */
+                    begin_game();
                 } else if (pending != last_pending) {
                     last_pending = pending;
                     status("Compiling shaders (" + std::to_string(pending) +
@@ -1274,10 +1432,6 @@ public:
                 break;
             if (aurora_begin_frame())
                 aurora_end_frame();
-            /* Spend the idle time until the next frame on the pipeline queue:
-             * with worker threads this only waits, as a plain delay did;
-             * without them (Android) it builds queued pipelines here, the only
-             * place they are built before a match. */
             const uint64_t idle_start = SDL_GetTicks();
             aurora_wait_pipelines(8);
             const uint64_t idle = SDL_GetTicks() - idle_start;
@@ -1328,7 +1482,6 @@ extern "C" void pc_launcher_configure(AuroraConfig* config) {
                 break;
             }
         }
-        // If not found in standard candidate names, scan Documents directory for any disc
         if ((prefs.disc.empty() || !file_accessible(prefs.disc)) && home && home[0] != '\0') {
             std::filesystem::path docs = std::filesystem::path(home) / "Documents";
             std::error_code dir_ec;
@@ -1398,6 +1551,24 @@ extern "C" int pc_launcher_run(const char* command_line_disc, SDL_Window* window
     try {
         std::string error;
         bool start_requested = false;
+#ifdef MELEE_XBOX_UWP
+        pc_log_line("Startup: preparing Melee storage");
+        try {
+            if (!melee_xbox_prepare_internal_storage()) {
+                error = "Could not create D:\\developmentfiles\\Melee folders.";
+            } else {
+                config_path = melee::xbox::active_root() / "settings" / "launcher.cfg";
+                if (std::filesystem::exists(config_path))
+                    prefs = launcher::load_preferences(config_path);
+                aurora_set_user_path(melee_xbox_settings_directory());
+                pc_net_set_input_delay(prefs.net_delay);
+            }
+        } catch (const std::exception& e) {
+            error = std::string("Could not set up Melee storage: ") + e.what();
+        }
+        if (!error.empty()) pc_log_line("%s", error.c_str());
+        else pc_log_line("Startup: Melee storage ready");
+#endif
         if (command_line_disc) {
             auto info = launcher::inspect_disc(command_line_disc);
             if (info.supported && aurora_dvd_open(command_line_disc)) {
@@ -1407,7 +1578,6 @@ extern "C" int pc_launcher_run(const char* command_line_disc, SDL_Window* window
                                  std::filesystem::absolute(command_line_disc).string();
                 if (!launcher::save_preferences(config_path, prefs, error))
                     SDL_Log("%s", error.c_str());
-                // Direct disc launches must use the same shader wait as Play.
                 start_requested = true;
             } else {
                 aurora_dvd_close();
@@ -1440,14 +1610,12 @@ extern "C" int pc_launcher_run(const char* command_line_disc, SDL_Window* window
     }
 }
 
-// In-game settings use the same preferences and RmlUi context as the launcher.
 #include <dolphin/vi.h>
 #include <dolphin/pad.h>
 extern "C" void pc_audio_set_volume(float volume);
 extern "C" void pc_audio_set_music_volume(float volume);
 extern "C" void pc_audio_set_sfx_volume(float volume);
 extern "C" void pc_audio_set_reverb(bool on);
-// Melee's own menu bank: 0 is back/cancel, 1 confirm, 2 the cursor tick.
 extern "C" void lbAudioAx_80024030(int);
 enum { SFX_BACK = 0, SFX_CONFIRM = 1, SFX_MOVE = 2 };
 namespace {
@@ -1457,25 +1625,23 @@ public:
     Rml::ElementDocument* counter = nullptr;
     SDL_Window* window = nullptr;
     bool open = false;
-    // Set while the menu writes its own widgets: suppresses the Change and
-    // Focus events that echo back, which would otherwise loop or chatter.
     bool quiet = false;
     uint64_t last_fps = 0, last_axis_y = 0, last_axis_x = 0;
     int tab = 0;
     u32 pad_port = 0;
-    // -1 when idle, otherwise the mapping slot waiting for input. Axis slots
-    // index the axis table instead of the button table.
     int binding = -1;
     bool binding_axis = false;
-    // The press that opened the prompt has to be released first, or the A
-    // that selected the row binds itself immediately.
     bool binding_armed = false;
     std::vector<std::string> focus_ids;
     Rml::Element* current_row = nullptr;
-    // Resizing the framebuffer allocates a fresh, empty texture. While the
-    // overlay pauses the game nothing redraws it, so the frozen frame behind
-    // the menu would go black: hold the change until the menu closes.
     bool resize_pending = false;
+#ifdef MELEE_XBOX_UWP
+    struct MenuChord {
+        unsigned held = 0;
+        bool fired = false;
+    };
+    std::unordered_map<SDL_JoystickID, MenuChord> menu_chords;
+#endif
 
     static bool is_sidebar(const Rml::String& id) {
         return index_of(tab_ids, id) >= 0 || id == "resume" || id == "quit-game";
@@ -1521,7 +1687,6 @@ public:
         }
     }
     void show_tab(int next) {
-        // The Launcher category only exists before starting the game.
         const int count = std::size(tab_ids) - 1;
         tab = (next + count) % count;
         for (int i = 0; i < count; ++i) {
@@ -1722,6 +1887,9 @@ public:
         slider("scale", prefs.scale * 100.0f);
         label("scale-val", std::to_string(int(prefs.scale * 100 + 0.5f)) + "%");
         label("menu-version", pc::get_app_version());
+#ifdef MELEE_XBOX_UWP
+        label("menu-shortcut", " · Start + Select to close");
+#endif
         auto ustate = pc::updater::get_state();
         if (ustate.status == pc::updater::Status::UpdateAvailable) {
             label("port-update-status", "Update available: " + ustate.latest_release.tag_name);
@@ -1753,10 +1921,11 @@ public:
             refresh();
             document->Show();
             show_tab(tab);
+#ifdef MELEE_XBOX_UWP
+            label("menu-status", "D-pad navigates · A selects · B goes back · Start + Select resumes");
+#endif
         } else {
             document->Hide();
-            // Both reallocate the framebuffer; each is a no-op when the value
-            // has not actually moved.
             if (resize_pending) {
                 pc_widescreen_set_mode(prefs.widescreen);
                 VISetFrameBufferScale(prefs.render_scale);
@@ -1779,7 +1948,6 @@ public:
                             "Press a button on the controller. Escape cancels; Delete clears.");
         refresh_bindings();
     }
-    // Runs once a frame while a bind prompt is up.
     void poll_binding() {
         if (binding < 0 || pad_port == 4)
             return;
@@ -1805,9 +1973,6 @@ public:
         if (binding_axis) {
             const PADAxisMapping* map = PADGetAxisMappings(pad_port, &count);
             if (map && u32(binding) < count) {
-                // One source or the other, never neither: aurora reads the
-                // axis when nativeAxis is set and asserts on the button
-                // otherwise.
                 PADSetAxisMapping(pad_port,
                     axis.nativeAxis >= 0 ?
                         PADAxisMapping{axis, SDL_GAMEPAD_BUTTON_INVALID, map[binding].padAxis} :
@@ -1887,7 +2052,6 @@ public:
             return;
         }
         if (id == "quit-game") {
-            // Leave through the same shutdown path as a normal window close.
             pc_exit_requested = true;
             toggle();
             return;
@@ -1944,7 +2108,6 @@ public:
                 label("menu-status", SDL_GetError());
                 return;
             }
-            // SDL applies the window change asynchronously; save the requested mode.
             prefs.fullscreen = fullscreen;
         } else if (id == "sync" && !std::getenv("MELEE_VSYNC")) {
             prefs.vsync = !prefs.vsync;
@@ -2042,7 +2205,6 @@ public:
         lbAudioAx_80024030(SFX_MOVE);
         saved();
     }
-    // Right enters a category; within a page, the arrows adjust its values.
     void step(int direction) {
         auto* focus = document->GetContext()->GetFocusElement();
         if (!focus)
@@ -2054,7 +2216,7 @@ public:
             return;
         }
         if (focus->GetTagName() == "input" && !is_slider(id))
-            return;  // Leave the caret's arrow keys to the text field.
+            return;
         if (focus->IsClassSet("value") && !focus->IsClassSet("action")) {
             apply(id, direction);
             return;
@@ -2082,11 +2244,35 @@ public:
         lbAudioAx_80024030(SFX_MOVE);
         saved();
     }
-    // Gamepad drives the overlay directly: while it is open PADBlockInput
-    // keeps the game from seeing any of this.
     void gamepad(const SDL_Event& e) {
         if (!document)
             return;
+#ifdef MELEE_XBOX_UWP
+        if (e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+            menu_chords.erase(e.gdevice.which);
+            return;
+        }
+        if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN || e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+            const unsigned bit = e.gbutton.button == SDL_GAMEPAD_BUTTON_START ? 1u :
+                                 e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK ? 2u : 0u;
+            if (bit != 0) {
+                auto& chord = menu_chords[e.gbutton.which];
+                if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN)
+                    chord.held |= bit;
+                else
+                    chord.held &= ~bit;
+                if (chord.held != 3u)
+                    chord.fired = false;
+                if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && chord.held == 3u &&
+                    !chord.fired && binding < 0)
+                {
+                    chord.fired = true;
+                    toggle();
+                    return;
+                }
+            }
+        }
+#endif
         if (open && binding >= 0 && pad_port != 4 && e.type == SDL_EVENT_KEY_DOWN &&
             e.key.scancode == SDL_SCANCODE_DELETE)
         {
@@ -2106,7 +2292,6 @@ public:
             const int slot = binding + (binding_axis ? PAD_BUTTON_COUNT : 0);
             const int code = e.key.scancode == SDL_SCANCODE_DELETE ? 0 : e.key.scancode;
             prefs.keys[slot] = code;
-            // Digital and analog trigger rows describe the same keyboard key.
             if (slot == 6 || slot == 7)
                 prefs.keys[slot + 14] = code;
             if (slot == 20 || slot == 21)
@@ -2118,16 +2303,18 @@ public:
         }
         if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
             const auto button = e.gbutton.button;
+#ifndef MELEE_XBOX_UWP
             if (binding < 0 && (button == SDL_GAMEPAD_BUTTON_GUIDE ||
-                                   (button == prefs.menu_button &&
-                                       (open || prefs.menu_button != SDL_GAMEPAD_BUTTON_BACK ||
-                                           !is_back_bound()))))
+                                (button == prefs.menu_button &&
+                                 (open || prefs.menu_button != SDL_GAMEPAD_BUTTON_BACK ||
+                                  !is_back_bound()))))
             {
                 toggle();
                 return;
             }
+#endif
             if (!open || binding >= 0)
-                return;  // a bind prompt owns every button
+                return;
             switch (button) {
             case SDL_GAMEPAD_BUTTON_DPAD_UP:
                 focus_step(-1);
@@ -2154,7 +2341,9 @@ public:
                 back();
                 break;
             case SDL_GAMEPAD_BUTTON_START:
+#ifndef MELEE_XBOX_UWP
                 toggle();
+#endif
                 break;
             default:
                 break;
@@ -2174,11 +2363,6 @@ public:
         }
     }
     void ProcessEvent(Rml::Event& event) override {
-        /* Hide() leaves RmlUi's focus inside the document it just hid, and
-         * RmlUi keeps delivering key events to that focus, so the closed menu
-         * went on eating input -- Return synthesises a Click on the hidden
-         * control, which plays the select sound (#84). While closed, nothing
-         * the menu could do is wanted. */
         if (!open)
             return;
         if (event.GetId() == Rml::EventId::Focus) {
@@ -2283,10 +2467,17 @@ extern "C" void pc_menu_init(SDL_Window* window) {
         SDL_Log("F1 menu: could not load port-menu.rml");
         return;
     }
+#ifdef MELEE_XBOX_UWP
+    if (auto* row = port_menu.document->GetElementById("menu-binding-row"))
+        row->SetProperty("display", "none");
+    if (auto* hint = port_menu.document->GetElementById("hint-open"))
+        hint->SetInnerRML("START + SELECT Opens settings");
+    if (auto* hint = port_menu.document->GetElementById("hint-close"))
+        hint->SetInnerRML("B Back · START + SELECT Close");
+#endif
     port_menu.document->AddEventListener(Rml::EventId::Click, &port_menu);
     port_menu.document->AddEventListener(Rml::EventId::Keydown, &port_menu);
     port_menu.document->AddEventListener(Rml::EventId::Change, &port_menu);
-    // Focus does not bubble; the capture pass still reaches the document.
     port_menu.document->AddEventListener(Rml::EventId::Focus, &port_menu, true);
     aurora_set_resampler(static_cast<AuroraSampler>(prefs.filter_mode));
 }
@@ -2303,9 +2494,6 @@ extern "C" void pc_menu_update(void) {
             if (!port_menu.counter->IsVisible())
                 port_menu.counter->Show(Rml::ModalFlag::None, Rml::FocusFlag::None);
             if (SDL_GetTicks() - port_menu.last_fps >= 500) {
-                /* Say when the pipeline queue is still draining: a draw whose
-                 * pipeline is not built yet is skipped, and that is what a pop
-                 * in the first minutes of a fresh install actually is. */
                 std::string text = std::to_string(int(aurora_get_fps() + 0.5f)) + " FPS";
                 const uint32_t pending = pending_pipelines();
                 if (pending > 0)
@@ -2332,20 +2520,9 @@ extern "C" bool pc_is_frozen_stadium_enabled(void) {
     if (pc_net_rules(&unlock_all, &frozen)) {
         return frozen;
     }
-    /* MELEE_FROZEN_STADIUM=0|1 overrides the preference, so a test can reach
-     * the transformations whatever the machine's launcher says. The host's
-     * value is what RULES carries, so setting it on the host is enough. */
     static const char* env = std::getenv("MELEE_FROZEN_STADIUM");
     return env ? env[0] != '0' : prefs.frozen_stadium;
 }
-/* Free camera and UCF are read by the simulation (camera.c's pause camera
- * feeds offscreen damage; UCF decides dashbacks and shield drops), so a
- * local preference must not reach it while the run has to reproduce on
- * another machine: two peers with different settings would desync on the
- * first dashback UCF changes. Such a run plays the competitive standard,
- * which is Slippi's too: UCF on, free camera off. Both peers run the same
- * build (the handshake binds it), so forcing here keeps them agreed without
- * a RULES field. */
 extern "C" bool pc_is_free_camera_enabled(void) {
     return !pc_net_deterministic() && prefs.free_camera;
 }
@@ -2382,8 +2559,6 @@ extern "C" const char* pc_get_net_name(void) {
 extern "C" const char* pc_get_net_target(void) {
     return prefs.net_target.c_str();
 }
-/* The lobby's own code entry (gmonlinemode.c) writes back here so the next
- * session and the F1 menu field agree with what the player just typed. */
 extern "C" void pc_set_net_target(const char* code) {
     prefs.net_target = code ? code : "";
     std::string error;

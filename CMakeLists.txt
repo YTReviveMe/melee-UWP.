@@ -5,6 +5,11 @@ if (NOT CMAKE_BUILD_TYPE)
 endif ()
 
 project(melee-pc LANGUAGES C CXX)
+if (WINDOWS_STORE)
+    add_compile_definitions(WINAPI_FAMILY=WINAPI_FAMILY_APP _WIN32_WINNT=0x0A00 NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_compile_options("/clang:-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.")
+    set(AURORA_DAWN_LINKAGE static CACHE STRING "Xbox UWP links Dawn statically" FORCE)
+endif ()
 
 # Native UI, updater and package metadata use the same release version.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
@@ -52,20 +57,64 @@ set(AURORA_ENABLE_DVD ON CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_CARD ON CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_THP ON CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_RMLUI ON CACHE BOOL "" FORCE)
+if (WINDOWS_STORE)
+    set(MELEE_XBOX_NOD_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/build-xbox-artifacts/nod-src"
+        CACHE PATH "Source checkout of nod built for x86_64-uwp-windows-msvc")
+    set(_melee_nod_output "${MELEE_XBOX_NOD_SOURCE}/target/x86_64-uwp-windows-msvc/release")
+    if (NOT EXISTS "${_melee_nod_output}/nod.dll" OR NOT EXISTS "${_melee_nod_output}/nod.dll.lib")
+        message(FATAL_ERROR "Build nod-ffi for x86_64-uwp-windows-msvc before configuring Melee")
+    endif ()
+    add_library(nod::nod SHARED IMPORTED GLOBAL)
+    set_target_properties(nod::nod PROPERTIES
+        IMPORTED_LOCATION "${_melee_nod_output}/nod.dll"
+        IMPORTED_IMPLIB "${_melee_nod_output}/nod.dll.lib"
+        INTERFACE_INCLUDE_DIRECTORIES "${MELEE_XBOX_NOD_SOURCE}/nod-ffi/include")
+    set(AURORA_NOD_PROVIDER vendor CACHE STRING "Use UWP nod build" FORCE)
+endif ()
 if (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(PNG_SHARED OFF CACHE BOOL "" FORCE)
     set(PNG_STATIC ON CACHE BOOL "" FORCE)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 endif ()
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
+if (WINDOWS_STORE AND TARGET dawn_native_objects)
+    execute_process(COMMAND "${CMAKE_COMMAND}"
+        "-DDAWN_SOURCE_DIR=${CMAKE_BINARY_DIR}/_deps/dawn-src"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/XboxDawnCache.cmake"
+        RESULT_VARIABLE _dawn_cache_patch_result)
+    if (NOT _dawn_cache_patch_result EQUAL 0)
+        message(FATAL_ERROR "Could not configure the Xbox D3D12 pipeline cache")
+    endif ()
+    target_compile_definitions(dawn_native_objects PRIVATE MELEE_XBOX_UWP=1)
+endif ()
+if (WINDOWS_STORE AND TARGET aurora_dvd)
+    target_include_directories(aurora_dvd PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/platforms/xbox")
+endif ()
+if (WINDOWS_STORE AND TARGET sqlite3)
+    target_compile_definitions(sqlite3 PRIVATE SQLITE_OS_WINRT=1)
+endif ()
+if (WINDOWS_STORE AND TARGET freetype)
+    get_target_property(_melee_ft_sources freetype SOURCES)
+    get_target_property(_melee_ft_source_dir freetype SOURCE_DIR)
+    list(FILTER _melee_ft_sources EXCLUDE REGEX "builds/windows/ftsystem\\.c$")
+    list(APPEND _melee_ft_sources "${_melee_ft_source_dir}/src/base/ftsystem.c")
+    set_property(TARGET freetype PROPERTY SOURCES "${_melee_ft_sources}")
+endif ()
+if (WINDOWS_STORE AND TARGET absl_time_zone)
+    target_sources(absl_time_zone PRIVATE platforms/xbox/absl_timezone.cpp)
+endif ()
 # FP determinism for netplay: no fused multiply-add anywhere game logic can
 # reach (AArch64 emits fmadd by default), no platform trig (see
 # src/pc/libm/pc_trig.h). aurora_mtx is C and used by collision, so it gets
 # the trig routing too; gx/gd only render.
 set(MELEE_FP_FLAGS -ffp-contract=off -fno-fast-math)
 target_compile_options(aurora_mtx PRIVATE ${MELEE_FP_FLAGS}
-        -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-tanf -fno-builtin-atanf
-        -include ${CMAKE_CURRENT_SOURCE_DIR}/src/pc/libm/pc_trig.h)
+        -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-tanf -fno-builtin-atanf)
+if (WINDOWS_STORE)
+    target_compile_options(aurora_mtx PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/src/pc/libm/pc_trig.h)
+else ()
+    target_compile_options(aurora_mtx PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/src/pc/libm/pc_trig.h)
+endif ()
 target_compile_options(aurora_gx PRIVATE ${MELEE_FP_FLAGS})
 target_compile_options(aurora_gd PRIVATE ${MELEE_FP_FLAGS})
 
@@ -161,8 +210,17 @@ endif ()
 include(cmake/GameSources.cmake)
 
 add_library(melee_game STATIC ${GAME_SOURCES} src/pc/widescreen.c)
+if (WINDOWS_STORE)
+    set_property(TARGET melee_game PROPERTY C_COMPILER_LAUNCHER
+            "${Python3_EXECUTABLE};${CMAKE_CURRENT_SOURCE_DIR}/platforms/xbox/gcc_bridge.py;--gcc;${MELEE_XBOX_GCC};--")
+endif ()
 target_include_directories(melee_game PUBLIC extern/aurora/include src src/sdk_include)
 target_compile_definitions(melee_game PUBLIC TARGET_PC=1 MELEE_PC=1)
+if (WINDOWS_STORE)
+    target_compile_definitions(melee_game PRIVATE
+        acosf=melee_acosf asinf=melee_asinf atan2f=melee_atan2f
+        expf=melee_expf powf=melee_powf)
+endif ()
 target_compile_options(melee_game PRIVATE
         -fpermissive
         -Wno-all -Wno-extra
@@ -281,6 +339,40 @@ if (ANDROID)
 else ()
     add_executable(melee ${PC_SOURCES})
 endif ()
+if (WINDOWS_STORE)
+    find_program(_vswhere vswhere
+        HINTS "C:/Program Files (x86)/Microsoft Visual Studio/Installer")
+    if (NOT _vswhere)
+        message(FATAL_ERROR "Visual Studio locator not found")
+    endif ()
+    execute_process(COMMAND "${_vswhere}" -latest -products *
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        OUTPUT_VARIABLE _vs_installation OUTPUT_STRIP_TRAILING_WHITESPACE)
+    file(GLOB _uwp_msvc_libs "${_vs_installation}/VC/Tools/MSVC/*/lib/x64/store/msvcprt.lib")
+    list(SORT _uwp_msvc_libs COMPARE NATURAL ORDER DESCENDING)
+    if (NOT _uwp_msvc_libs)
+        message(FATAL_ERROR "Visual C++ UWP libraries not found")
+    endif ()
+    list(GET _uwp_msvc_libs 0 _uwp_msvc_lib)
+    get_filename_component(_uwp_msvc_lib_dir "${_uwp_msvc_lib}" DIRECTORY)
+    target_link_directories(melee BEFORE PRIVATE "${_uwp_msvc_lib_dir}")
+    foreach (_uwp_dependency zlib-ng png_shared)
+        if (TARGET ${_uwp_dependency})
+            target_link_directories(${_uwp_dependency} BEFORE PRIVATE "${_uwp_msvc_lib_dir}")
+        endif ()
+    endforeach ()
+    target_sources(melee PRIVATE platforms/xbox/storage.cpp platforms/xbox/disc_stream.cpp
+        platforms/xbox/runtime_bridge.c platforms/xbox/main.cpp platforms/xbox/xaudio_output.cpp)
+    target_compile_definitions(melee PRIVATE MELEE_XBOX_UWP=1)
+    target_link_libraries(melee PRIVATE windowsapp xaudio2)
+    execute_process(COMMAND "${MELEE_XBOX_GCC}" -print-libgcc-file-name
+        OUTPUT_VARIABLE _melee_libgcc OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if (NOT EXISTS "${_melee_libgcc}")
+        message(FATAL_ERROR "MinGW libgcc archive not found: ${_melee_libgcc}")
+    endif ()
+    target_link_libraries(melee PRIVATE "${_melee_libgcc}")
+    target_link_options(melee PRIVATE "/alternatename:__imp__setjmp=__imp___intrinsic_setjmp" /APPCONTAINER /SUBSYSTEM:WINDOWS)
+endif ()
 
 target_include_directories(melee PRIVATE extern/monocypher)
 
@@ -303,19 +395,13 @@ if (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     )
 endif ()
 
-# Non-PIE: static data and code stay below 4GB (32-bit pointer slots in disc data).
 if (WIN32)
-    # -static-libstdc++/-static-libgcc: linking the C++ runtime as a DLL makes the linker
-    # auto-import its data symbols, including C++ vtables, through MinGW's runtime
-    # pseudo-relocation (_pei386_runtime_relocator). This image carries 330 such auto-imported
-    # vtable/typeinfo symbols. Constructing the first std::ifstream reads a virtual-base offset
-    # out of the auto-imported std::basic_ifstream<char> vtable to compute `this`, and on native
-    # Windows that yields a bad pointer: std::basic_ios<char>::init() then writes to address 0.
-    # Linking the runtime statically removes the auto-imported vtables entirely.
-    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
-        target_link_options(melee PRIVATE -Wl,--image-base,0x10000000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va -Wl,-u,WinMain)
-    else ()
-        target_link_options(melee PRIVATE -static-libstdc++ -static-libgcc -Wl,--image-base,0x10000000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va -Wl,-u,WinMain)
+    if (NOT WINDOWS_STORE)
+        if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+            target_link_options(melee PRIVATE -Wl,--image-base,0x10000000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va -Wl,-u,WinMain)
+        else ()
+            target_link_options(melee PRIVATE -static-libstdc++ -static-libgcc -Wl,--image-base,0x10000000 -Wl,--disable-dynamicbase -Wl,--disable-high-entropy-va -Wl,-u,WinMain)
+        endif ()
     endif ()
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/platforms/windows/melee.rc")
         target_sources(melee PRIVATE platforms/windows/melee.rc)
@@ -324,37 +410,22 @@ if (WIN32)
     if (COMMAND aurora_copy_runtime_dlls)
         aurora_copy_runtime_dlls(melee)
     endif ()
-    # Two DLLs the exe imports that nothing stages, so a fresh build-win died
-    # with STATUS_DLL_NOT_FOUND (c0000135) before the first log line:
-    #   nod.dll            aurora_copy_runtime_dlls copies $<TARGET_RUNTIME_DLLS>,
-    #                      i.e. each imported target's IMPORTED_LOCATION file
-    #                      name, and nodConfig.cmake points that at
-    #                      bin/libnod.dll (CMAKE_SHARED_LIBRARY_PREFIX). The
-    #                      MinGW import library in the same package was built
-    #                      against nod.dll, so nod.dll is the name in our
-    #                      import table; the prebuilt ships both, byte for
-    #                      byte identical. find_package(nod) ran in aurora's
-    #                      directory scope, so nod::nod_shared is not visible
-    #                      here and the file has to be found on disc.
-    #   libwinpthread-1.dll  a toolchain file, not a CMake target, so it is in
-    #                      no runtime-DLL set at all. tools/package_windows.sh
-    #                      finds it for the zip, which is why this only ever
-    #                      broke running from the build directory.
-    # The Clang names mirror MINGW_DLLS in package_windows.sh; under GCC they
-    # resolve to nothing and are skipped.
-    set(_melee_runtime_dlls nod.dll libwinpthread-1.dll)
+    if (WINDOWS_STORE)
+        add_custom_command(TARGET melee POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_melee_nod_output}/nod.dll" "$<TARGET_FILE_DIR:melee>")
+    endif ()
+    if (WINDOWS_STORE)
+        set(_melee_runtime_dlls "")
+    else ()
+        set(_melee_runtime_dlls nod.dll libwinpthread-1.dll)
+    endif ()
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         list(APPEND _melee_runtime_dlls libc++.dll libunwind.dll)
     endif ()
     get_filename_component(_cxx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    # aurora fetched the nod package during its own configure, so its bin/ is
-    # already on disc; globbed rather than named so a renamed FetchContent
-    # directory still resolves.
     file(GLOB _nod_bins LIST_DIRECTORIES true "${CMAKE_BINARY_DIR}/_deps/*nod*/bin")
     foreach (_dll IN LISTS _melee_runtime_dlls)
         string(MAKE_C_IDENTIFIER "MELEE_RUNTIME_${_dll}" _cache_var)
-        # The sysroot's bin/ is where mingw-w64 keeps its DLLs; -print-file-name
-        # only knows the link-time libraries, so it misses them.
         find_file(${_cache_var} NAMES ${_dll}
                 PATHS ${_nod_bins} ${CMAKE_FIND_ROOT_PATH} ${_cxx_bin}/.. ${_cxx_bin}
                 PATH_SUFFIXES bin
@@ -387,6 +458,11 @@ else ()
     set(MELEE_STATE_SECTIONS ON)
 endif ()
 include(cmake/WindowsSnapshot.cmake)
+if (WINDOWS_STORE)
+    get_filename_component(_melee_gcc_dir "${MELEE_XBOX_GCC}" DIRECTORY)
+    find_program(CMAKE_OBJCOPY NAMES objcopy PATHS "${_melee_gcc_dir}" NO_DEFAULT_PATH REQUIRED)
+    find_program(CMAKE_OBJDUMP NAMES objdump PATHS "${_melee_gcc_dir}" NO_DEFAULT_PATH REQUIRED)
+endif ()
 melee_enable_windows_snapshots(melee melee_game)
 include(cmake/AppleSnapshot.cmake)
 melee_enable_apple_snapshots(melee melee_game)

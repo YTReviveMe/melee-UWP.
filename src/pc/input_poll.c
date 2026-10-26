@@ -150,7 +150,7 @@ bool pc_input_latency(float* mean_ms, float* max_ms, float* p99_ms) {
         *max_ms = max;
     }
     if (p99_ms != NULL) {
-        /* ponytail: sort a copy on demand; callers ask once per frame at most. */
+        /* sort a copy on demand; callers ask once per frame at most. */
         float sorted[AGE_WINDOW];
         memcpy(sorted, s_age_ms, sizeof(float) * (size_t)s_age_n);
         qsort(sorted, (size_t)s_age_n, sizeof(float), cmp_float);

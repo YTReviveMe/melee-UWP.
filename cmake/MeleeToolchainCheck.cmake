@@ -1,16 +1,27 @@
-# Compiler gate. Include right after project(); it runs at include time.
-#
-# The game reads on-disc structures through
-# __attribute__((scalar_storage_order("big-endian"))), which only GCC
-# implements, and only for C. Clang accepts the syntax and ignores it, so a
-# Clang build compiles clean and then reads every disc field byte-swapped.
-#
-# Android, Apple and Windows-ARM64 keep Clang for the C++ and route the game's
-# C through GCC (tools/gcc_launcher.py, tools/gcc_ios_launcher.py,
-# tools/gcc_windows_arm64_launcher.py), so CMAKE_C_COMPILER_ID is Clang there
-# on purpose and the gate does not apply. Emscripten has no GCC at all: its
-# game C goes through the lowering pass in tools/browser instead.
 include_guard(GLOBAL)
+
+if (WINDOWS_STORE)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(MELEE_XBOX_GCC "" CACHE FILEPATH "MinGW x64 GCC for the Melee game C sources")
+    if (NOT MELEE_XBOX_GCC)
+        unset(MELEE_XBOX_GCC CACHE)
+        find_program(MELEE_XBOX_GCC NAMES x86_64-w64-mingw32-gcc gcc
+                PATHS C:/msys64/mingw64/bin NO_DEFAULT_PATH)
+    endif ()
+    if (NOT MELEE_XBOX_GCC)
+        message(FATAL_ERROR "Xbox UWP needs MinGW x64 GCC for game disc structures")
+    endif ()
+    execute_process(COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/../platforms/xbox/gcc_bridge.py"
+            --gcc "${MELEE_XBOX_GCC}" --probe
+            RESULT_VARIABLE _melee_xbox_gcc_probe
+            OUTPUT_VARIABLE _melee_xbox_gcc_stdout
+            ERROR_VARIABLE _melee_xbox_gcc_stderr)
+    if (NOT _melee_xbox_gcc_probe EQUAL 0)
+        message(FATAL_ERROR "Xbox GCC bridge cannot compile scalar_storage_order to COFF: ${_melee_xbox_gcc_probe}\n${_melee_xbox_gcc_stdout}\n${_melee_xbox_gcc_stderr}")
+    endif ()
+    return()
+endif ()
 
 if (EMSCRIPTEN OR ANDROID OR APPLE OR (WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$"))
     return()

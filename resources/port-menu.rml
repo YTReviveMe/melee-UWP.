@@ -18,7 +18,7 @@
         </span>
         <span id="edition">
           <span id="menu-version">Melee PC</span>
-          <span> · F1 to close</span>
+          <span id="menu-shortcut"> · F1 to close</span>
         </span>
       </div>
       <div id="preferences">
@@ -174,8 +174,8 @@
             </div>
           </div>
           <div id="page-online" class="page">
-            <div class="row" data-desc="1–8 letters or digits. Changes apply to the next search.">
-              <span class="name">Player name<span class="detail">1–8 letters or digits. Changes apply to the next search.</span>
+            <div class="row" data-desc="1 to 8 letters or digits. Changes apply to the next search.">
+              <span class="name">Player name<span class="detail">1 to 8 letters or digits. Changes apply to the next search.</span>
               </span>
               <input type="text" id="net-name" maxlength="8" value="PLAYER" />
             </div>
@@ -305,7 +305,7 @@
               </span>
               <button id="bind-reset" class="value action">Restore</button>
             </div>
-            <div class="row" data-desc="Choose the button that opens settings on all controllers. Guide and F1 always work too.">
+            <div id="menu-binding-row" class="row" data-desc="Choose the button that opens settings on all controllers. Guide and F1 always work too.">
               <span class="name">Menu button</span>
               <button id="menu-binding" class="value action">Back</button>
             </div>
@@ -321,8 +321,8 @@
       </div>
     </div>
     <div id="hints">ARROWS / D-PAD Navigate <span>ENTER / A Select</span>
-      <span>ESC / B Back · F1 Close</span>
-      <span>BACK Opens this menu</span>
+      <span id="hint-close">ESC / B Back · F1 Close</span>
+      <span id="hint-open">BACK Opens this menu</span>
     </div>
   </body>
 </rml>

@@ -4,15 +4,24 @@
 #include <iostream>
 #include <future>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 // Disc-open diagnostics are supplied by the game executable in production.
 extern "C" void pc_log_line(const char*, ...) {}
 
 int main(int argc, char** argv) {
     using namespace launcher;
+#ifdef _WIN32
+    const auto process_id = GetCurrentProcessId();
+#else
+    const int process_id = getpid();
+#endif
     auto dir = std::filesystem::temp_directory_path() /
-               ("melee-launcher-test-" + std::to_string(getpid()));
+               ("melee-launcher-test-" + std::to_string(process_id));
     std::filesystem::create_directories(dir);
     assert(!inspect_disc("").supported);
     assert(!inspect_disc((dir / "missing.iso").string()).supported);

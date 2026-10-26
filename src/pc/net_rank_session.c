@@ -226,7 +226,7 @@ bool pc_rank_session_proof(unsigned player, const void* value, size_t size, int6
         } else if (rating.sets > 64) {
             /* Full genesis-anchored ancestry needs one immutable DHT record
              * per claimed set; beyond this bound it cannot complete inside
-             * the WAIT deadline. // ponytail: raise or checkpoint when
+             * the WAIT deadline. Raise or checkpoint when
              * veteran strangers report denial; do not relax the pin. */
             pc_rank_session_abort("peer ancestry exceeds bounded verification limit");
             return false;

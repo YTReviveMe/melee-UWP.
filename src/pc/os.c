@@ -15,9 +15,14 @@
 #include <dolphin/os/OSError.h>
 
 #include <SDL3/SDL_timer.h>
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/pthread_compat.h"
+#else
 #include <pthread.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "pc/pc.h"
 #include "pc/disc.h"
@@ -184,7 +189,7 @@ void pc_os_run_alarms(void) {
             OSAlarmHandler handler = a->handler;
             if (a->period > 0) {
                 if (a->period <= OSMillisecondsToTicks(10)) {
-                    /* ponytail: periodic alarms like the 3ms pad-poll alarm only
+                    /* periodic alarms like the 3ms pad-poll alarm only
                      * need "has fired since last frame" semantics to avoid redundant polling. */
                     a->fire += a->period;
                     if (a->fire <= now) {
@@ -434,6 +439,14 @@ void OSVReport(const char* msg, va_list list) {
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[Melee] %{public}s", buf);
     vfprintf(stdout, msg, list);
     fflush(stdout);
+#elif defined(MELEE_XBOX_UWP)
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), msg, list);
+    size_t length = strlen(buf);
+    while (length && (buf[length - 1] == '\n' || buf[length - 1] == '\r'))
+        buf[--length] = '\0';
+    if (length)
+        pc_log_line("game: %s", buf);
 #else
     vfprintf(stdout, msg, list);
     fflush(stdout);

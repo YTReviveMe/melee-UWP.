@@ -7,6 +7,9 @@
 #include <SDL3/SDL_iostream.h>
 #include <stdint.h>
 #include <stdlib.h>
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/disc_stream.h"
+#endif
 
 static int64_t nod_sdl_read_at(void* userData, uint64_t offset, void* out, size_t len) {
     SDL_IOStream* io = (SDL_IOStream*)userData;
@@ -48,6 +51,15 @@ NodResult pc_open_nod_disc(const char* path, NodHandle** out) {
         return NOD_RESULT_ERR_OTHER;
     }
 
+#if defined(MELEE_XBOX_UWP)
+    NodDiscStream uwp_stream;
+    if (melee_xbox_open_disc_stream(path, &uwp_stream)) {
+        const NodDiscOptions options = {.preloader_threads = 1};
+        NodResult result = nod_disc_open_stream(&uwp_stream, &options, out);
+        if (result == NOD_RESULT_OK && *out != NULL) return result;
+        pc_log_line("disc: UWP storage stream rejected %s (%d)", path, (int)result);
+    }
+#endif
     SDL_IOStream* io = SDL_IOFromFile(path, "rb");
     if (io != NULL) {
         const NodDiscStream stream = {

@@ -516,7 +516,7 @@ const char* state_line(int32_t frame) {
  *      machine's TUs are excluded there: the audio thread owns them);
  *   2. every OSAlloc heap's live extent except the audio heap;
  *   3. the RNG seed pointer (aurora-side static the game redirects).
- * ponytail: plain memcpy each time; dirty tracking only if the measured cost
+ * plain memcpy each time; dirty tracking only if the measured cost
  * breaks the rollback budget. */
 /* ELF, PE and Mach-O builds all provide simulation-only static ranges.
  * Keep the missing-region guard for isolated fixtures/invalid images; normal

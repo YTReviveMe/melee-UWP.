@@ -78,16 +78,16 @@ inline UberUniform make_uber_uniform(const std::array<TevStage, MaxTevStages>& s
   for (u32 i = 0; i < MaxUberStages; ++i) {
     const auto& stage = stages[i];
     auto& out = uniform.stages[i];
-    out.colorArgs = {stage.colorPass.a, stage.colorPass.b, stage.colorPass.c, stage.colorPass.d};
-    out.alphaArgs = {stage.alphaPass.a, stage.alphaPass.b, stage.alphaPass.c, stage.alphaPass.d};
+    out.colorArgs = {u32(stage.colorPass.a), u32(stage.colorPass.b), u32(stage.colorPass.c), u32(stage.colorPass.d)};
+    out.alphaArgs = {u32(stage.alphaPass.a), u32(stage.alphaPass.b), u32(stage.alphaPass.c), u32(stage.alphaPass.d)};
     const auto op = [](const TevOp& value) -> std::array<u32, 4> {
-      return {value.op, value.bias, value.scale, u32(value.outReg) | (u32(value.clamp) << 8)};
+      return {u32(value.op), u32(value.bias), u32(value.scale), u32(value.outReg) | (u32(value.clamp) << 8)};
     };
     out.colorOp = op(stage.colorOp);
     out.alphaOp = op(stage.alphaOp);
-    out.konst = {stage.kcSel, stage.kaSel, 0, 0};
+    out.konst = {u32(stage.kcSel), u32(stage.kaSel), 0, 0};
   }
-  uniform.alpha[0] = {alpha.comp0, alpha.ref0, alpha.op, alpha.comp1};
+  uniform.alpha[0] = {u32(alpha.comp0), alpha.ref0, u32(alpha.op), u32(alpha.comp1)};
   uniform.alpha[1] = {alpha.ref1, 0, 0, 0};
   return uniform;
 }

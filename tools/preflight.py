@@ -245,7 +245,7 @@ def main(argv):
 
     print(f"melee-pc preflight: target {target} (host {sys.platform} "
           f"{os.uname().machine if hasattr(os, 'uname') else ''})")
-    # ponytail: fix lines use the package names CI installs; translating them
+    # fix lines use the package names CI installs; translating them
     # to every distro is a package database, not a preflight.
     print("fix commands use Debian/Ubuntu (CI) package names\n")
     common_checks()

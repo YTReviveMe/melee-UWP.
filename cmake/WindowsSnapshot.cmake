@@ -5,7 +5,11 @@ function(melee_enable_windows_snapshots executable game_library)
     if (NOT WIN32)
         return()
     endif()
-    if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|ARM64|arm64|aarch64)$")
+    set(_melee_processor "${CMAKE_SYSTEM_PROCESSOR}")
+    if (WINDOWS_STORE AND NOT _melee_processor)
+        set(_melee_processor "${CMAKE_HOST_SYSTEM_PROCESSOR}")
+    endif ()
+    if (NOT _melee_processor MATCHES "^(AMD64|amd64|x86_64|ARM64|arm64|aarch64)$")
         message(FATAL_ERROR "Windows rollback requires an x86-64 or ARM64 target")
     endif()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -32,9 +36,14 @@ function(melee_enable_windows_snapshots executable game_library)
         "${_launcher};${_exclusions}")
     target_sources(${executable} PRIVATE "${_markers}")
     target_compile_definitions(${executable} PRIVATE MELEE_STATE_SECTIONS=1)
+    if (WINDOWS_STORE)
+        target_link_options(${executable} PRIVATE "/MAP:${CMAKE_CURRENT_BINARY_DIR}/melee.map")
+        set(_verify_map_arg --map "${CMAKE_CURRENT_BINARY_DIR}/melee.map")
+    endif ()
     add_custom_command(TARGET ${executable} POST_BUILD
         COMMAND "${Python3_EXECUTABLE}" "${_verify}" --nm "${CMAKE_NM}"
             "$<TARGET_FILE:${executable}>"
+            ${_verify_map_arg}
             --tracked HSD_PadLibData HSD_Rumble_804C22E0 gmVsMelee_StartData
             --excluded net HSD_Synth_804D6018
         VERBATIM

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         IgnorableNamespaces="uap">
+  <Identity Name="MeleeUWP" Publisher="CN=MeleePC.XboxDev"
+            Version="0.4.2.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Melee</DisplayName>
+    <PublisherDisplayName>Melee</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0"
+                        MaxVersionTested="10.0.26100.0" />
+    <PackageDependency Name="Microsoft.VCLibs.140.00"
+                       Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+                       MinVersion="14.0.0.0" />
+  </Dependencies>
+  <Resources><Resource Language="en-us" /></Resources>
+  <Applications>
+    <Application Id="App" Executable="melee.exe" EntryPoint="MeleePC.App">
+      <uap:VisualElements DisplayName="Melee"
+                          Description="Melee for Xbox Dev Mode"
+                          BackgroundColor="#382B45"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#382B45" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="melee-files">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.iso</uap:FileType>
+              <uap:FileType>.gcm</uap:FileType>
+              <uap:FileType>.ciso</uap:FileType>
+              <uap:FileType>.rvz</uap:FileType>
+              <uap:FileType>.gcz</uap:FileType>
+              <uap:FileType>.wia</uap:FileType>
+              <uap:FileType>.png</uap:FileType>
+              <uap:FileType>.dds</uap:FileType>
+              <uap:FileType>.ogg</uap:FileType>
+              <uap:FileType>.wav</uap:FileType>
+              <uap:FileType>.gci</uap:FileType>
+              <uap:FileType>.raw</uap:FileType>
+              <uap:FileType>.cfg</uap:FileType>
+              <uap:FileType>.ini</uap:FileType>
+              <uap:FileType>.controller</uap:FileType>
+              <uap:FileType>.dat</uap:FileType>
+              <uap:FileType>.key</uap:FileType>
+              <uap:FileType>.txt</uap:FileType>
+              <uap:FileType>.history</uap:FileType>
+              <uap:FileType>.tmp</uap:FileType>
+              <uap:FileType>.lock</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <uap:Capability Name="removableStorage" />
+    <Capability Name="internetClient" />
+  </Capabilities>
+</Package>

@@ -5,7 +5,11 @@
 #include <string.h>
 
 #if defined(__ANDROID__) || defined(__APPLE__) || defined(TARGET_OS_IPHONE)
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/pthread_compat.h"
+#else
 #include <pthread.h>
+#endif
 #include <SDL3/SDL_events.h>
 
 #if defined(__ANDROID__)

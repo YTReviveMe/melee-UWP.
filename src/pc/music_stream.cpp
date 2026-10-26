@@ -13,6 +13,9 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#ifdef MELEE_XBOX_UWP
+#include "../../platforms/xbox/storage.hpp"
+#endif
 
 namespace {
 
@@ -34,7 +37,9 @@ static std::vector<std::filesystem::path> get_search_directories() {
     std::vector<std::filesystem::path> dirs;
     std::error_code ec;
 
-    // 1. User preferences directory: ~/.local/share/melee-pc/music/
+#ifdef MELEE_XBOX_UWP
+    dirs.push_back(melee::xbox::active_root() / "music");
+#else
     char* pref = pc_get_pref_path();
     if (pref != nullptr) {
         dirs.push_back(std::filesystem::path(pref) / "music");
@@ -48,31 +53,20 @@ static std::vector<std::filesystem::path> get_search_directories() {
     if (xdg != nullptr && !pc_is_portable()) {
         dirs.push_back(std::filesystem::path(xdg) / "melee-pc" / "music");
     }
+#endif
 
-    // 2. Directory beside binary: <base>/music/
     const char* base = SDL_GetBasePath();
     if (base != nullptr) {
         dirs.push_back(std::filesystem::path(base) / "music");
     }
 
-    // 3. Current working directory: ./music/
     dirs.push_back(std::filesystem::current_path(ec) / "music");
     dirs.push_back(std::filesystem::path("music"));
 
-    // Deduplicate while preserving search order
     std::vector<std::filesystem::path> unique_dirs;
-    for (const auto& d : dirs) {
-        bool exists = false;
-        for (const auto& u : unique_dirs) {
-            if (d == u) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            unique_dirs.push_back(d);
-        }
-    }
+    for (const auto& dir : dirs)
+        if (std::find(unique_dirs.begin(), unique_dirs.end(), dir) == unique_dirs.end())
+            unique_dirs.push_back(dir);
     return unique_dirs;
 }
 
@@ -84,13 +78,11 @@ static std::vector<std::string> generate_candidate_stems(const char* track_stem)
 
     std::string stem(track_stem);
 
-    // Strip leading directories
     size_t last_slash = stem.find_last_of("/\\");
     if (last_slash != std::string::npos) {
         stem = stem.substr(last_slash + 1);
     }
 
-    // Strip extension if present
     size_t last_dot = stem.find_last_of('.');
     if (last_dot != std::string::npos) {
         stem = stem.substr(0, last_dot);
@@ -108,20 +100,15 @@ static std::vector<std::string> generate_candidate_stems(const char* track_stem)
         }
     };
 
-    // Primary candidates
     add_candidate(stem);
     add_candidate(lower_stem);
 
-    // If starts with "vl_", also check without "vl_" prefix (e.g. "vl_battle" -> "battle")
     if (lower_stem.rfind("vl_", 0) == 0 && lower_stem.length() > 3) {
         add_candidate(lower_stem.substr(3));
     } else {
-        // Conversely, if doesn't start with "vl_", also probe "vl_" prefix (e.g. "battle" ->
-        // "vl_battle")
         add_candidate("vl_" + lower_stem);
     }
 
-    // Menu variations: menu01 <-> menu1, menu02 <-> menu2, menu3 <-> menu03, etc.
     if (lower_stem == "menu01") {
         add_candidate("menu1");
         add_candidate("menu_01");
@@ -148,14 +135,12 @@ static std::vector<std::string> generate_candidate_stems(const char* track_stem)
         add_candidate("menu_3");
     }
 
-    // Stadium variations: pstadium <-> pokesta
     if (lower_stem == "pstadium") {
         add_candidate("pokesta");
     } else if (lower_stem == "pokesta") {
         add_candidate("pstadium");
     }
 
-    // Notice fanfare variations: s_info1..3 <-> notice / fanfare / achievement / info
     if (lower_stem == "s_info1" || lower_stem == "s_info2" || lower_stem == "s_info3") {
         add_candidate("notice");
         add_candidate("fanfare");
@@ -193,7 +178,6 @@ static std::string probe_audio_file(const char* track_stem) {
             continue;
         }
 
-        // 1. Direct path check
         for (const auto& cand : candidates) {
             for (const char* ext : extensions) {
                 auto file_path = dir / (cand + ext);
@@ -203,7 +187,6 @@ static std::string probe_audio_file(const char* track_stem) {
             }
         }
 
-        // 2. Case-insensitive directory scan
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
             if (!entry.is_regular_file(ec)) {
                 continue;
@@ -229,7 +212,6 @@ static void pump_stream_locked() {
         return;
     }
 
-    // Keep at least 64 KiB converted data queued
     while (SDL_GetAudioStreamAvailable(s_stream) < 64 * 1024) {
         size_t remaining = s_pcm_data.size() - s_pcm_offset;
         if (remaining == 0) {

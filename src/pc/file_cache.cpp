@@ -16,7 +16,13 @@
 #include <vector>
 
 #include <sys/stat.h>
+#if defined(MELEE_XBOX_UWP)
+#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#define S_ISREG(mode) (((mode) & _S_IFMT) == _S_IFREG)
+#endif
+#if !defined(MELEE_XBOX_UWP)
 #include <unistd.h>
+#endif
 #if defined(__linux__)
 #include <sys/resource.h>
 #endif
@@ -417,6 +423,11 @@ void pc_file_cache_start_prewarm(void) {
     }
 
     const char* env_prewarm = getenv("MELEE_PREWARM");
+#if defined(MELEE_XBOX_UWP)
+    if (env_prewarm == nullptr || strcmp(env_prewarm, "1") != 0) {
+        return;
+    }
+#endif
     if (env_prewarm != nullptr &&
         (strcmp(env_prewarm, "0") == 0 || strcmp(env_prewarm, "false") == 0))
     {

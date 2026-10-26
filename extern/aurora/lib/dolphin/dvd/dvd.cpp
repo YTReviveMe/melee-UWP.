@@ -36,6 +36,9 @@
 #include "dvd.hpp"
 
 #include "../../internal.hpp"
+#if defined(_WIN32) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+#include "disc_stream.h"
+#endif
 
 using namespace aurora::dvd::impl;
 
@@ -753,7 +756,10 @@ bool aurora_dvd_open(const char* disc_path) {
   NodDiscStream stream{};
   bool streamReady = false;
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+  streamReady = melee_xbox_open_disc_stream(disc_path, &stream) != 0;
+#endif
+#if defined(_WIN32) && WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
   HANDLE hFile = CreateFileA(disc_path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (hFile != INVALID_HANDLE_VALUE) {
     LARGE_INTEGER fileSize;

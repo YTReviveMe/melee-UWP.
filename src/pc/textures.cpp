@@ -12,6 +12,9 @@
 
 #include <filesystem>
 #include <string>
+#ifdef MELEE_XBOX_UWP
+#include "../../platforms/xbox/storage.hpp"
+#endif
 
 namespace {
 
@@ -21,8 +24,16 @@ std::string s_textures_dir_str;
 bool s_initialized = false;
 
 std::filesystem::path resolve_texture_directory() {
-    // 1. On Linux/Windows, user data dir is pc_get_pref_path().
-    //    Use a "textures" subdirectory there: <prefPath>/textures
+#ifdef MELEE_XBOX_UWP
+    const auto directory = melee::xbox::active_root() / "textures";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) {
+        SDL_Log("Could not create texture folder: %s", ec.message().c_str());
+        return {};
+    }
+    return directory;
+#else
     std::filesystem::path user_dir;
     char* pref = pc_get_pref_path();
     if (pref != nullptr) {
@@ -30,13 +41,11 @@ std::filesystem::path resolve_texture_directory() {
         SDL_free(pref);
     }
 
-    // 2. Create the user textures directory if it does not exist.
     std::error_code ec;
     if (!user_dir.empty() && !std::filesystem::exists(user_dir, ec)) {
         std::filesystem::create_directories(user_dir, ec);
     }
 
-    // 3. Also check if a local "textures" folder exists beside the executable.
     const char* base = SDL_GetBasePath();
     std::filesystem::path local_dir;
     if (base != nullptr) {
@@ -50,6 +59,7 @@ std::filesystem::path resolve_texture_directory() {
     }
 
     return user_dir;
+#endif
 }
 
 }  // namespace

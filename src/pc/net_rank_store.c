@@ -145,8 +145,17 @@ PcNetRankStore* pc_rank_store_open(
         goto fail;
     }
 #ifdef _WIN32
+#if defined(MELEE_XBOX_UWP)
+    int wide_length = MultiByteToWideChar(CP_UTF8, 0, lock_path, -1, NULL, 0);
+    wchar_t* wide_path = wide_length > 0 ? malloc((size_t)wide_length * sizeof(wchar_t)) : NULL;
+    if (wide_path && MultiByteToWideChar(CP_UTF8, 0, lock_path, -1, wide_path, wide_length)) {
+        s->lock = CreateFile2(wide_path, GENERIC_READ | GENERIC_WRITE, 0, OPEN_ALWAYS, NULL);
+    }
+    free(wide_path);
+#else
     s->lock = CreateFileA(
         lock_path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+#endif
     free(lock_path);
     if (s->lock == INVALID_HANDLE_VALUE)
         goto fail;

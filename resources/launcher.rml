@@ -50,6 +50,28 @@
         </div>
       </div>
     </div>
+    <div id="storage-browser">
+      <h2>Choose Melee Disc</h2>
+      <p id="storage-location" class="path">D:\developmentfiles\Melee</p>
+      <div class="storage-actions">
+        <button id="storage-root" class="mini">Internal D:  |  switch to USB</button>
+        <button id="storage-refresh" class="mini">Rescan USB</button>
+      </div>
+      <div id="storage-list">
+        <button id="storage-0" class="storage-entry"></button>
+        <button id="storage-1" class="storage-entry"></button>
+        <button id="storage-2" class="storage-entry"></button>
+        <button id="storage-3" class="storage-entry"></button>
+        <button id="storage-4" class="storage-entry"></button>
+        <button id="storage-5" class="storage-entry"></button>
+        <button id="storage-6" class="storage-entry"></button>
+        <button id="storage-7" class="storage-entry"></button>
+      </div>
+      <div class="storage-actions">
+        <button id="storage-next" class="mini">Next</button>
+      </div>
+      <p id="storage-status" class="note"></p>
+    </div>
     <div id="preferences">
       <div id="categories">
         <button id="tab-graphics" class="plate small" data-desc="How the game looks."><span>Graphics</span></button>

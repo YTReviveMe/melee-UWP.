@@ -451,6 +451,13 @@ void initialize() noexcept {
    * as expected */
   AURORA_ASSERT(SDL_Init(SDL_INIT_HAPTIC | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD | SDL_INIT_SENSOR),
                 "Failed to initialize SDL subsystems: {}", SDL_GetError());
+#if defined(SDL_PLATFORM_WINRT)
+  int count = 0;
+  SDL_JoystickID* gamepads = SDL_GetGamepads(&count);
+  Log.info("WinRT gamepad discovery: WGI={}, {} controller(s)",
+           SDL_GetHintBoolean(SDL_HINT_JOYSTICK_WGI, false), count);
+  SDL_free(gamepads);
+#endif
 }
 
 struct MouseScrollStatus {

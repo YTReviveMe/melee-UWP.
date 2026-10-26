@@ -53,7 +53,7 @@
  * so they come from the platform CSPRNG and nowhere else: pc_install_id()
  * (pc.h:65) is persistent and public, and HSD_Rand is the game's
  * deterministic RNG whose seed is on the wire. There is deliberately no
- * fallback — a machine that cannot produce 8 random bytes fails the
+ * fallback. A machine that cannot produce 8 random bytes fails the
  * handshake instead of producing a predictable nonce. */
 #if defined(MELEE_USE_BCRYPT)
 #include <bcrypt.h>
@@ -280,7 +280,7 @@ static void rules_apply(const Rules* ru, bool from_peer) {
  * mode-end paths (gm_17C0.c, gmmultiman.c, gmhomerun.c, gmscmemcard.c,
  * tyfigupon.c), so a VS session never saves and a crash mid-session loses
  * only the forced value, never the card.
- * ponytail: that is "no VS path saves today", not an enforced invariant. A
+ * that is "no VS path saves today", not an enforced invariant. A
  * save trigger added to a VS path must run after rules_restore(), or the
  * flush has to be suppressed while s_unlock_saved is set. */
 static void unlock_force(void) {
@@ -407,7 +407,7 @@ static void seed_apply(void) {
  * session can never inherit the first one's nonce, whatever order connect,
  * disconnect and the lobby run in. 0 means the CSPRNG failed and the
  * handshake must not proceed.
- * ponytail: 0 doubles as "not drawn yet", so an all-zero draw (2^-64) is
+ * 0 doubles as "not drawn yet", so an all-zero draw (2^-64) is
  * simply drawn again on the next call. */
 static uint64_t nonce_local(void) {
     if (s_nonce_session != net.session) {
@@ -460,7 +460,7 @@ static void on_rules(const uint8_t* payload, int len) {
      * disagree about what "all unlocked" is -- one peer would run with a
      * reader still saying "locked", which is a silent mid-match seed
      * divergence. Refuse instead (local://UnlockSync-doc.md).
-     * ponytail: refusing sends no READY, so the host only finds out from its
+     * refusing sends no READY, so the host only finds out from its
      * own 15 s timeout. Sending a READY and then failing would cut that to
      * one RTT, but it would make the guest's refusal depend on the host
      * checking too; a NAK message type is the fix if this path ever stops
@@ -524,7 +524,7 @@ static void on_ready(const uint8_t* payload, int len) {
     /* A READY is ours only if it hashes under this session id and echoes the
      * nonce we put in RULES; a capture from any earlier session fails both,
      * and an off-path forgery has to guess 64 bits. Refusals are dropped,
-     * not failed, so an injected READY cannot end a live handshake — the
+     * not failed, so an injected READY cannot end a live handshake. The
      * genuine one still arrives, or the 15 s timeout fires. */
     if (rd.hash != ready_hash(rd, net.session)) {
         hs_drop(LOG_READY_HASH, "READY", "hash mismatch");

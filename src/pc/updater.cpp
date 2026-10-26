@@ -766,7 +766,7 @@ void start_download_async() {
         if (ok && total_bytes > 0) {
             // The release API told us the asset size: a short file is an
             // interrupted or disk-full download, never something to execute.
-            // ponytail: size only; SHA-256 when the API digest is trusted.
+            // size only; SHA-256 when the API digest is trusted.
             std::error_code ec;
             auto got = std::filesystem::file_size(dest_path, ec);
             if (ec || got != total_bytes) {
@@ -838,7 +838,7 @@ void open_downloaded_location() {
         return;
 
     auto parent = std::filesystem::path(path).parent_path().string();
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(MELEE_XBOX_UWP)
     ShellExecuteA(NULL, "open", parent.c_str(), NULL, NULL, SW_SHOW);
 #elif defined(__linux__)
     std::string cmd = "xdg-open \"" + parent + "\" &";

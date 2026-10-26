@@ -193,6 +193,21 @@ button {
 /* ---- Main menu ---------------------------------------------------------- */
 
 #home { flex: 1; min-height: 0; display: flex; align-items: center; }
+#storage-browser { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.in-storage #home { display: none; }
+.in-storage #storage-browser { display: flex; }
+#storage-browser h2 { margin: 5dp 0; color: #ffcb00; }
+#storage-browser .path { margin: 0 0 8dp; overflow: hidden; }
+.storage-actions { display: flex; gap: 10dp; margin: 4dp 0; }
+.storage-actions .mini { min-width: 120dp; }
+#storage-list { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.storage-entry {
+    display: block; width: 100%; height: 45dp; min-height: 0;
+    margin: 2dp 0; padding: 5dp 14dp; text-align: left;
+    color: #e8e8f0; background-color: #14142a;
+    border: 2dp #4c5d90; border-radius: 6dp;
+}
+.storage-entry:focus { color: #141008; background-color: #ffcb00; border-color: #fff0a0; }
 #plates { width: 54%; max-width: 660dp; flex-shrink: 0; }
 /* Melee stacks its plates touching, staggered into a wedge that points left
  * at the middle two; the lower half mirrors the upper. */

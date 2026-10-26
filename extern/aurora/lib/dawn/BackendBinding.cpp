@@ -27,6 +27,10 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Wind
       std::make_shared<wgpu::SurfaceSourceAndroidNativeWindow>();
   desc->window = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
   return std::move(desc);
+#elif defined(SDL_PLATFORM_WINRT)
+  auto desc = std::make_shared<wgpu::SurfaceDescriptorFromWindowsCoreWindow>();
+  desc->coreWindow = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WINRT_WINDOW_POINTER, nullptr);
+  return desc;
 #elif defined(SDL_PLATFORM_WIN32)
   std::shared_ptr<wgpu::SurfaceSourceWindowsHWND> desc = std::make_shared<wgpu::SurfaceSourceWindowsHWND>();
   desc->hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);

@@ -225,6 +225,9 @@ void pc_log_line(const char* fmt, ...);
 
 static void node_cache(bool save) {
 #ifndef PC_DHT_TEST_NO_BOOTSTRAP
+#if defined(MELEE_XBOX_UWP)
+    char path[2048] = "D:\\developmentfiles\\Melee\\cache\\dht-nodes-v1.dat";
+#else
     char* root = pc_get_pref_path();
     if (!root)
         return;
@@ -233,6 +236,7 @@ static void node_cache(bool save) {
     SDL_free(root);
     if (n < 0 || n >= (int)sizeof(path))
         return;
+#endif
     struct sockaddr_in nodes[64];
     int count = 64, count6 = 0;
     if (save) {

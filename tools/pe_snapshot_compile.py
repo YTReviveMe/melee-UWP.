@@ -132,9 +132,15 @@ def main() -> int:
         if "-c" not in command:
             return 0
         sources = [Path(arg) for arg in command if arg.endswith(".c") and Path(arg).is_file()]
-        if len(sources) != 1 or "-o" not in command:
-            raise ValueError("expected a single C source and explicit -o object")
-        output = Path(command[command.index("-o") + 1])
+        if len(sources) != 1:
+            raise ValueError("expected a single C source")
+        if "-o" in command:
+            output = Path(command[command.index("-o") + 1])
+        else:
+            outputs = [arg[3:] for arg in command if arg.startswith("/Fo")]
+            if len(outputs) != 1:
+                raise ValueError("expected an explicit -o or /Fo object")
+            output = Path(outputs[0])
         if sources[0].name in exclusions(args.exclude_script):
             return 0
         rewrite(output, args.objcopy, args.objdump)

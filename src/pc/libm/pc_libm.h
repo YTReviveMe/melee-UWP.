@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <float.h>
 #include <math.h>
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923
+#endif
 
 /* musl's code assumes float/double are evaluated at their own precision.
  * Every target we ship (x86-64 SSE, AArch64) satisfies this; a platform

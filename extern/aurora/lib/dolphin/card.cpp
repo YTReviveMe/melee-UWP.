@@ -337,8 +337,6 @@ void CARDInit(const char* game, const char* maker) {
   else
     cardWorkingDir = std::filesystem::current_path();
 
-  bool loadedCard = false;
-
   for (int i = 0; i < 2; ++i) {
     // use default working directory if no path was supplied for card
     if (cardPaths[i].empty()) {
@@ -350,7 +348,6 @@ void CARDInit(const char* game, const char* maker) {
 
     std::error_code ec;
     if (std::filesystem::exists(curPath, ec) && CardChannels[i]->open(curPath)) {
-      loadedCard = true;
       Log.info("Loaded GC Card Image: {}", aurora::io::fs_path_to_string(curPath));
     } else if (ec) {
       Log.warn("Failed to inspect GC Card path '{}': {}", aurora::io::fs_path_to_string(curPath), ec.message());
@@ -360,11 +357,29 @@ void CARDInit(const char* game, const char* maker) {
   }
 
   std::error_code createError;
-  if (!loadedCard && !std::filesystem::exists(cardPaths[0], createError) && !createError) {
+  if (!cardPaths[0].empty() && !std::filesystem::exists(cardPaths[0], createError) && !createError) {
+    Log.info("Creating Slot A memory card: {}", aurora::io::fs_path_to_string(cardPaths[0]));
     CardChannels[0]->open(cardPaths[0]);
-    CardChannels[0]->format(aurora::card::ECardSlot::SlotA);
-    CardChannels[0]->close();
-    CardChannels[0]->open(cardPaths[0]);
+    const auto result = CardChannels[0]->format(aurora::card::ECardSlot::SlotA);
+    if (result == aurora::card::ECardResult::READY) {
+      CardChannels[0]->close();
+      if (CardChannels[0]->open(cardPaths[0])) {
+        Log.info("Slot A memory card ready: {}", aurora::io::fs_path_to_string(cardPaths[0]));
+      } else {
+        Log.error("Slot A memory card was created but could not be reopened: {}",
+                  aurora::io::fs_path_to_string(cardPaths[0]));
+      }
+    } else {
+      Log.error("Could not create Slot A memory card (result {}): {}", static_cast<int>(result),
+                aurora::io::fs_path_to_string(cardPaths[0]));
+    }
+  } else if (createError) {
+    Log.error("Could not inspect Slot A memory card path: {}", createError.message());
+  }
+  if (!cardPaths[0].empty()) {
+    const auto probe = CardChannels[0]->probeCardFile(cardPaths[0]);
+    Log.info("Slot A card probe: result {}, size {} Mbit, path {}", static_cast<int>(probe.x0_error),
+             probe.x4_cardSize, aurora::io::fs_path_to_string(cardPaths[0]));
   }
 }
 

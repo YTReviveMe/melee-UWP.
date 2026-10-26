@@ -9,6 +9,9 @@
 #include <dolphin/os.h>
 
 #include <SDL3/SDL.h>
+#if defined(MELEE_XBOX_UWP)
+#define SDL_MAIN_NOIMPL
+#endif
 #include <SDL3/SDL_main.h>
 #include <errno.h>
 #include <stdarg.h>
@@ -26,6 +29,10 @@
 #include "pc/android_hooks.h"
 #include "pc/launcher.h"
 
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/storage_api.h"
+#endif
+
 int melee_main(void);
 
 #if defined(__ANDROID__)
@@ -33,12 +40,6 @@ int melee_main(void);
 #endif
 
 #if defined(__ANDROID__)
-/* Android writes crash backtraces to a protobuf tombstone under /data, which
- * an unrooted device only surfaces through `adb bugreport` -- two minutes per
- * iteration, and the rotation drops them faster than that when the app is
- * crash-looping. So unwind in-process and put the frames straight in logcat.
- * dladdr gives the library and the nearest exported symbol; the offsets are
- * what `addr2line -f -C -e libmelee.so` wants. */
 #include <dlfcn.h>
 #include <signal.h>
 #include <unistd.h>
@@ -69,13 +70,6 @@ static _Unwind_Reason_Code melee_unwind_frame(struct _Unwind_Context* ctx, void*
     return _URC_NO_REASON;
 }
 
-/* Handlers displaced by ours. Android installs debuggerd's SIGABRT/SIGSEGV
- * handler at process start, and that is what writes the tombstone -- with
- * the abort message, which is the only place a scudo or FORTIFY diagnosis
- * appears. Resetting to SIG_DFL instead of chaining loses it: the default
- * action just kills the process, so an in-process backtrace is bought at
- * the price of every tombstone (measured: no tombstone for any crash this
- * session, while /data/tombstones still held last week's). */
 static struct sigaction s_prev_sa[NSIG];
 
 static void melee_fatal_signal(int sig, siginfo_t* si, void* uc) {
@@ -84,7 +78,6 @@ static void melee_fatal_signal(int sig, siginfo_t* si, void* uc) {
         si ? si->si_addr : NULL, (int)gettid());
     MeleeUnwindState st = {0};
     _Unwind_Backtrace(melee_unwind_frame, &st);
-    /* Hand back to whoever had it, so a real tombstone is still written. */
     if (sig >= 0 && sig < NSIG) {
         sigaction(sig, &s_prev_sa[sig], NULL);
     } else {
@@ -108,10 +101,6 @@ static void melee_install_crash_handler(void) {
 static void melee_install_crash_handler(void) {}
 #endif
 
-/* A log file sink, so a double-clicked build still leaves a diagnosable
- * trace after its console disappears. MELEE_LOG_FILE picks the path; an
- * empty value disables it. Windows defaults it on because that is where the
- * console is not a reliable place to read errors from. */
 static FILE* log_file(void) {
     static FILE* fp;
     static bool tried;
@@ -119,8 +108,13 @@ static FILE* log_file(void) {
         tried = true;
         const char* path = getenv("MELEE_LOG_FILE");
         static char portable_log[4096];
+#if defined(MELEE_XBOX_UWP)
+        if (path == NULL) {
+            char* directory = SDL_GetPrefPath(NULL, "melee-pc");
+#else
         if (path == NULL && pc_is_portable()) {
             char* directory = pc_get_pref_path();
+#endif
             if (directory != NULL) {
                 snprintf(portable_log, sizeof portable_log, "%smelee-pc.log", directory);
                 SDL_free(directory);
@@ -139,8 +133,6 @@ static FILE* log_file(void) {
     return fp;
 }
 
-/* Milliseconds since the first log record. Without a time base there is no
- * way to line a frame stall up against what the engine was loading. */
 static double log_now_ms(void) {
     static Uint64 t0;
     const Uint64 now = SDL_GetTicksNS();
@@ -164,7 +156,7 @@ void pc_log_line(const char* fmt, ...) {
 #if defined(__APPLE__)
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[Melee] %{public}s", msg);
 #elif defined(__ANDROID__)
-    __android_log_print(ANDROID_LOG_INFO, "Melee", "%s", msg); /* stderr is not logcat */
+    __android_log_print(ANDROID_LOG_INFO, "Melee", "%s", msg);
 #endif
     fprintf(stderr, "[%9.3f] %s\n", t, msg);
     fflush(stderr);
@@ -206,9 +198,6 @@ static void log_callback(
     FILE* out = level >= LOG_ERROR ? stderr : stdout;
     const double t = log_now_ms();
     fprintf(out, "[%9.3f] [%s] %s: %.*s\n", t, names[level], module, (int)len, message);
-    /* stdout is block-buffered when redirected to a file, and the abort()
-     * below does not flush it. Without this, `melee.exe > log.txt` drops the
-     * lines leading up to a fatal -- exactly the ones worth reading. */
     fflush(out);
     FILE* lf = log_file();
     if (lf != NULL) {
@@ -226,12 +215,7 @@ static void log_callback(
 #if defined(_WIN32)
 #include <windows.h>
 
-/* A hard crash never reaches log_callback, so the log would otherwise just
- * stop with no reason. Record the exception, the faulting address, and a
- * backtrace as "module+RVA" per frame -- that names the failing module and
- * feeds straight into addr2line against the matching build. */
-
-/* Resolve an address to "module+RVA", which is what addr2line needs. */
+#if !defined(MELEE_XBOX_UWP)
 static void describe_addr(void* addr, char* out, size_t out_size) {
     char path[MAX_PATH];
     HMODULE mod = NULL;
@@ -264,9 +248,6 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* info) {
         describe_addr((void*)rec->ExceptionAddress, where, sizeof(where));
         fprintf(
             s, "[FATAL] crash: exception 0x%08X at %s\n", (unsigned int)rec->ExceptionCode, where);
-        /* For an access violation the second parameter is the address that
-         * was touched; 0 vs garbage distinguishes a null deref from a wild
-         * pointer, which is the first thing worth knowing. */
         if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
             const char* op = "access to";
             if (rec->ExceptionInformation[0] == 0) {
@@ -287,6 +268,19 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* info) {
     }
     return EXCEPTION_EXECUTE_HANDLER;
 }
+#else
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS* info) {
+    const EXCEPTION_RECORD* rec = info->ExceptionRecord;
+    pc_log_line("[FATAL] crash: exception 0x%08X at %p",
+                (unsigned int)rec->ExceptionCode, rec->ExceptionAddress);
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        pc_log_line("[FATAL] crash: access kind %llu, address 0x%llX",
+                    (unsigned long long)rec->ExceptionInformation[0],
+                    (unsigned long long)rec->ExceptionInformation[1]);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 #endif
 
 static void usage(const char* argv0) {
@@ -314,8 +308,6 @@ static void pc_shutdown_once(void) {
     pc_net_match_stop();
     pc_net_disconnect();
     pc_lan_stop();
-    /* Stop producers before joining DMA and destroying platform resources.
-     * An unjoined ARQ worker aborts in std::thread's static destructor. */
     pc_input_poll_shutdown();
     AXQuit();
     aurora_dvd_close();
@@ -324,14 +316,6 @@ static void pc_shutdown_once(void) {
     aurora_shutdown();
 }
 
-/* SIGINT/SIGTERM only ask the loops to leave; they run the real exit path
- * themselves (the launcher's loop, pc_frame_boundary in vi.c). exit() from
- * here ran the static destructors on whatever this thread was doing: once
- * the launcher's idle time waited on aurora's pipeline-ready condition
- * variable, the signal landed inside that wait and ~condition_variable
- * blocked for ever on its own waiter (the launcher-startup smoke case hung
- * until killed). A second signal gets the default action, so an impatient
- * Ctrl+C still ends a wedged process. */
 static void pc_on_signal_exit(int sig) {
     pc_exit_requested = true;
     signal(sig, SIG_DFL);
@@ -352,9 +336,6 @@ static const struct {
     {"null", BACKEND_NULL},
 };
 
-/* Local, so this costs no header question: strcasecmp lives in <strings.h> on
- * POSIX and is declared in <string.h> on MinGW only when __STRICT_ANSI__ is
- * off, which depends on the -std the target happens to use. */
 static int ieq(const char* a, const char* b) {
     for (; *a != '\0' && *b != '\0'; a++, b++) {
         int ca = (unsigned char)*a, cb = (unsigned char)*b;
@@ -380,13 +361,6 @@ static const char* backend_name(AuroraBackend b) {
     return "?";
 }
 
-/* MELEE_BACKEND pins the graphics backend instead of taking aurora's preferred
- * order. That order is per-platform -- on Windows D3D12 comes before Vulkan,
- * and on Linux only Vulkan is built -- so the same code takes a different path
- * on each, and a fault that appears on one and not the other cannot be bisected
- * without being able to pin it. `MELEE_BACKEND=vulkan` on Windows is the direct
- * test for "is this the D3D12 path?". An unknown value lists the valid ones and
- * falls back to BACKEND_AUTO rather than failing the run. */
 static AuroraBackend backend_from_env(void) {
     const char* want = getenv("MELEE_BACKEND");
     if (want == NULL || want[0] == '\0') {
@@ -409,13 +383,6 @@ static AuroraBackend backend_from_env(void) {
     return BACKEND_AUTO;
 }
 
-/* Android has no way to hand a process an environment: `am start` passes
- * extras, not env, so every MELEE_* knob -- the netplay fixtures, the heap
- * check, the log file -- is unreachable on a phone, which is exactly where
- * they are hardest to do without. Read them from a file next to the disc
- * instead, one NAME=VALUE per line, '#' comments ignored, existing
- * environment always winning so a shell-set value is never overridden.
- * Harmless on desktop: no file, no effect. */
 static void pc_env_file_bootstrap(void) {
     const char* paths[] = {
 #if defined(__ANDROID__)
@@ -427,9 +394,6 @@ static void pc_env_file_bootstrap(void) {
         FILE* f = fopen(paths[i], "r");
         if (f == NULL) {
 #if defined(__ANDROID__)
-            /* Straight to logcat: this runs before the aurora log callback is
-             * installed, so pc_log_line() would be dropped and the knobs would
-             * look silently inert. */
             __android_log_print(
                 ANDROID_LOG_INFO, "melee", "env: no %s (errno %d)", paths[i], errno);
 #endif
@@ -454,7 +418,7 @@ static void pc_env_file_bootstrap(void) {
             while (n > 0 && (val[n - 1] == '\n' || val[n - 1] == '\r' || val[n - 1] == ' ')) {
                 val[--n] = '\0';
             }
-            SDL_setenv_unsafe(s, val, 0); /* 0: never clobber a real environment value */
+            SDL_setenv_unsafe(s, val, 0);
         }
         fclose(f);
 #if defined(__ANDROID__)
@@ -466,15 +430,16 @@ static void pc_env_file_bootstrap(void) {
 }
 
 MELEE_EXPORT int main(int argc, char* argv[]) {
-    melee_install_crash_handler(); /* before anything can crash */
-    pc_env_file_bootstrap();       /* before anything calls getenv() */
+    melee_install_crash_handler();
+    pc_env_file_bootstrap();
+#if defined(MELEE_XBOX_UWP)
+    SDL_SetHint(SDL_HINT_JOYSTICK_WGI, "1");
+    SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "1");
+#endif
 #if defined(_WIN32)
     SetUnhandledExceptionFilter(crash_handler);
 #endif
 
-    /* Pre-initialize GameCube OS memory immediately so that MEM1 (96 MB) is
-     * committed strictly below 4GB at process startup before SDL, graphics
-     * drivers, and fullscreen swapchains fragment low virtual memory. */
     OSInit();
 
     const char* disc = NULL;
@@ -505,22 +470,11 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
                 fprintf(stderr, "%s: more than one disc given (%s, %s)\n", argv[0], disc, d);
                 usage(argv[0]);
             }
-            /* A `content://` URI is not a filesystem path. On Android the
-             * disc arrives as one from the file picker, and it is opened
-             * through SDL_IOStream (`pc_open_nod_disc`, src/pc/disc_open.h);
-             * `fopen` cannot open one, so probing with it rejected every
-             * disc a phone can actually hand us. */
             const bool uri = strncmp(d, "content://", 10) == 0;
             FILE* f = uri ? NULL : fopen(d, "rb");
             if (d[0] == '\0' || (!uri && f == NULL)) {
                 fprintf(stderr, "%s: cannot open disc %s\n", argv[0], d);
 #if defined(__ANDROID__)
-                /* exit() runs static destructors while the Java UI thread is
-                 * still drawing, which aborts it inside minikin with
-                 * "FORTIFY: pthread_mutex_lock called on a destroyed mutex":
-                 * a crash report for what is really a bad path. Carry on
-                 * into the launcher with no disc, exactly as if the app had
-                 * been started without one. */
                 continue;
 #else
                 exit(2);
@@ -533,38 +487,53 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
         }
     }
 
-    /* RmlUi resolves a document's relative assets (the launcher's art under launcher/)
-     * against this. Aurora otherwise defaults it to the executable's own
-     * directory, where those files are not: they ship under resources/. The
-     * trailing separator matters, the path is concatenated as-is. */
     static char resources_path[4096];
     const char* base_path = SDL_GetBasePath();
 #if defined(__ANDROID__)
-    resources_path[0] = '\0'; /* assets come from the APK, not a directory */
+    resources_path[0] = '\0';
 #else
     snprintf(
         resources_path, sizeof resources_path, "%sresources/", base_path != NULL ? base_path : "");
 #endif
 
+#if defined(MELEE_XBOX_UWP)
+    char* user_path = SDL_GetPrefPath(NULL, "melee-pc");
+#else
     char* user_path = pc_get_pref_path();
+#endif
     if (user_path == NULL) {
         fprintf(stderr, "Could not create game data directory: %s\n", SDL_GetError());
         return 1;
     }
+#if defined(MELEE_XBOX_UWP)
+    pc_log_line("Startup: LocalState ready");
+    const char* cache_path = "D:\\developmentfiles\\Melee\\cache";
+    if (SDL_CreateDirectory(cache_path)) {
+        const char* databases[] = {"pipeline_cache.db", "dawn_cache.db"};
+        for (size_t i = 0; i < sizeof databases / sizeof databases[0]; ++i) {
+            char source[4096], destination[4096];
+            snprintf(source, sizeof source, "%s%s", user_path, databases[i]);
+            snprintf(destination, sizeof destination, "%s\\%s", cache_path, databases[i]);
+            SDL_PathInfo info;
+            if (SDL_GetPathInfo(source, &info) && info.type == SDL_PATHTYPE_FILE &&
+                !SDL_GetPathInfo(destination, &info) && !SDL_CopyFile(source, destination))
+                SDL_Log("Could not migrate %s: %s", databases[i], SDL_GetError());
+        }
+    } else {
+        SDL_Log("Could not create internal cache folder: %s", SDL_GetError());
+    }
+#endif
     AuroraConfig config = {
-        /* appName doubles as the window title; the save/cache dirs stay
-         * pinned so a renamed test window still uses the same memory card. */
         .appName = getenv("MELEE_WINDOW_TITLE") ? getenv("MELEE_WINDOW_TITLE") : "melee-pc",
         .userPath = user_path,
         .resourcesPath = resources_path[0] != '\0' ? resources_path : NULL,
-        /* MELEE_CACHE_DIR: two instances on one machine (netplay testing)
-         * must not share the pipeline-cache SQLite file. */
+#if defined(MELEE_XBOX_UWP)
+        .cachePath = cache_path,
+#else
         .cachePath = getenv("MELEE_CACHE_DIR") ? getenv("MELEE_CACHE_DIR") : user_path,
+#endif
         .msaa = 1,
         .maxTextureAnisotropy = 16,
-        /* MELEE_VSYNC=0 picks Mailbox/Immediate instead of FifoRelaxed; some
-         * compositors stop scanning out a FifoRelaxed surface and the window
-         * then sits on a stale frame while the game runs on. */
         .vsync = !(getenv("MELEE_VSYNC") && getenv("MELEE_VSYNC")[0] == '0'),
 #if defined(__ANDROID__)
         .logLevel = LOG_DEBUG,
@@ -578,18 +547,12 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
         .mem1Size = PC_MEM1_SIZE,
         .mem2Size = PC_ARAM_SIZE,
     };
-    /* Before aurora_initialize -> SDL_Init(JOYSTICK): claims the GC adapter's
-     * hidapi hint so SDL's rescaling driver leaves it for our raw path. */
     pc_gcadapter_init();
     pc_launcher_configure(&config);
 
     const AuroraInfo info = aurora_initialize(argc, argv, &config);
 
-    /* Built-in fallback mappings for common 3rd-party GameCube adapters
-     * (DragonRise / Mayflash in PC mode) so they work out-of-the-box even if
-     * external database files are missing. */
     static const char* const k_builtin_mappings[] = {
-        /* Mayflash / DragonRise 4-port adapter (PC mode) - Linux */
         "03000000790000004318000010010000,Mayflash GameCube "
         "Adapter,a:b1,b:b0,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,lefttrigger:a3,leftx:a0,"
         "lefty:a1,rightshoulder:b7,righttrigger:a4,rightx:a5,righty:a2,start:b9,x:b2,y:b3,platform:"
@@ -602,7 +565,6 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
         "Adapter,a:b1,b:b2,dpdown:b14,dpleft:b15,dpright:b13,dpup:b12,lefttrigger:a3,leftx:a0,"
         "lefty:a1,rightshoulder:b7,righttrigger:a4,rightx:a5,righty:a2,start:b9,x:b0,y:b3,platform:"
         "Linux,",
-        /* Mayflash / DragonRise (PC mode) - Windows */
         "03000000790000004318000000000000,Mayflash GameCube "
         "Adapter,a:b1,b:b2,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,leftshoulder:b4,"
         "lefttrigger:a3,leftx:a0,lefty:a1,rightshoulder:b7,righttrigger:a4,rightx:a5,righty:a2,"
@@ -615,7 +577,6 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
         "Adapter,a:b1,b:b2,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,lefttrigger:a3,leftx:a0,"
         "lefty:a1,rightshoulder:b7,righttrigger:a4,rightx:a5,righty:a2,start:b9,x:b0,y:b3,platform:"
         "Windows,",
-        /* Mayflash / DragonRise (PC mode) - macOS */
         "03000000790000004318000000010000,Mayflash GameCube "
         "Adapter,a:b4,b:b0,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,lefttrigger:a12,leftx:a0,"
         "lefty:a4,rightshoulder:b28,righttrigger:a16,rightx:a20,righty:a8,start:b36,x:b8,y:b12,"
@@ -628,7 +589,6 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
         "Adapter,a:b1,b:b2,dpdown:b14,dpleft:b15,dpright:b13,dpup:b12,lefttrigger:a3,leftx:a0,"
         "lefty:a1,rightshoulder:b7,righttrigger:a4,rightx:a5,righty:a2,start:b9,x:b0,y:b3,platform:"
         "Mac OS X,",
-        /* Mayflash (Android) */
         "6d6179666c617368206c696d69746564,Mayflash GameCube "
         "Adapter,a:b22,b:b21,dpdown:b12,dpleft:b13,dpright:b14,dpup:b11,lefttrigger:b25,leftx:a0,"
         "lefty:a1,rightshoulder:b28,righttrigger:b26,rightx:a5,righty:a2,start:b30,x:b23,y:b24,"
@@ -658,13 +618,6 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
     if (mappings_loaded > 0) {
         pc_log_line("input: loaded %d gamepad mappings from gamecontrollerdb.txt", mappings_loaded);
     }
-    /* Record which backend was actually selected and the adapter it landed on.
-     * Without this the log cannot say whether a run went through D3D12 or
-     * Vulkan, or on which GPU/driver, which is the first thing worth knowing
-     * about a fault that only reproduces on one machine. The origin has to be
-     * derived from info.backend, not from the request alone: a run pinned to
-     * d3d11 that aurora quietly fell back to d3d12 would otherwise log
-     * "d3d12 (pinned)", which is the opposite of the truth. */
     char origin[64];
     if (config.desiredBackend == BACKEND_AUTO) {
         snprintf(origin, sizeof(origin), " (auto)");
@@ -677,24 +630,19 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
     pc_log_line("graphics backend: %s%s, adapter: %s [%04x:%04x], driver: %s",
         backend_name(info.backend), origin, info.adapterName, info.adapterVendorId,
         info.adapterDeviceId, info.adapterDriver);
-    /* Closing the window exits from inside the frame loop (pc/vi.c), which
-     * would otherwise skip aurora_shutdown() entirely: Dawn's static
-     * destructors then tear the device down while aurora still thinks it is
-     * live, its device-lost callback reports FATAL and log_callback aborts.
-     * Run the shutdown from atexit so every exit path goes through it. */
     atexit(pc_shutdown_once);
     signal(SIGINT, pc_on_signal_exit);
     signal(SIGTERM, pc_on_signal_exit);
 
-    /* The launcher is an RmlUi UI on the same surface, and the touch overlay
-     * sits on top of it: leave the overlay inert until the game itself is
-     * running, or it eats the taps meant for the disc picker. */
     pc_android_set_launcher_active(true);
     const int launched = pc_launcher_run(disc, info.window);
     if (launched != 1)
         return launched == 0 ? 0 : 1;
     pc_android_set_launcher_active(false);
 
+#if defined(MELEE_XBOX_UWP)
+    CARDSetBasePath(melee_xbox_saves_directory(), -1);
+#endif
     pc_menu_init(info.window);
     pc_platform_init();
     aurora_card_set_present(card);

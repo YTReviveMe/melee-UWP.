@@ -136,6 +136,7 @@ typedef struct {
 
 AuroraInfo aurora_initialize(int argc, char* argv[], const AuroraConfig* config);
 void aurora_shutdown();
+void aurora_set_user_path(const char* path);
 const AuroraEvent* aurora_update();
 bool aurora_begin_frame();
 void aurora_end_frame();

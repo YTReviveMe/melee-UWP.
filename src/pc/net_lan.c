@@ -51,7 +51,7 @@
  * MELEE_LAN_TEST=1|host runs this without the menu (os.c/vi.c); two
  * instances need distinct MELEE_NET_PORT and MELEE_CACHE_DIR.
  *
- * ponytail: only service PTR questions are answered (third-party browsers
+ * only service PTR questions are answered (third-party browsers
  * list us and see our addresses but get no unicast replies); one address
  * per family. */
 #include "pc/net_lan.h"
@@ -94,9 +94,7 @@
  * saw at least this long ago (2 announce periods): a genuine host always
  * broadcasts lobby state before it claims to be starting, so a record that
  * appears out of nowhere already starting with our peer id is a spoof
- * (LAN-SPOOF-AUTOJOIN). ponytail: trust-on-observation only; a determined
- * attacker with a longer presence still gets through — the real fix is a
- * signed proposal keyed by the peer's ed25519 identity. */
+ * (LAN-SPOOF-AUTOJOIN). */
 #define LOBBY_DWELL_NS (2 * ANNOUNCE_NS)
 #define REL_READY_BARRIER 0x11 /* reliable type: "my handshake is done" (net_lan.h) */
 /* Ubuntu's clang-format (what CI installs) and 22.x disagree on the spacing
@@ -203,7 +201,7 @@ static const char* state_txt(void) {
  * metadata for the life of the disc), so nothing is read off the image here;
  * computed once and cached.
  *
- * ponytail: pins the code and the file-table shape, not every file's bytes,
+ * pins the code and the file-table shape, not every file's bytes,
  * so a data-only mod that leaves the FST shape alone (a swapped Pl*.dat of
  * the same size) still matches. Fold in every base FST entry's name and
  * size when that shows up. */

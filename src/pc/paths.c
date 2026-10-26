@@ -5,9 +5,12 @@
 #endif
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_stdinc.h>
+#if defined(MELEE_XBOX_UWP)
+#include "../../platforms/xbox/storage_api.h"
+#endif
 
 bool pc_is_portable(void) {
-#if defined(__ANDROID__) || defined(__APPLE__) && TARGET_OS_IPHONE
+#if defined(MELEE_XBOX_UWP) || defined(__ANDROID__) || defined(__APPLE__) && TARGET_OS_IPHONE
     return false;
 #else
     const char* base = SDL_GetBasePath();
@@ -23,6 +26,9 @@ bool pc_is_portable(void) {
 }
 
 char* pc_get_pref_path(void) {
+#if defined(MELEE_XBOX_UWP)
+    return SDL_strdup(melee_xbox_settings_directory());
+#endif
     if (!pc_is_portable())
         return SDL_GetPrefPath(NULL, "melee-pc");
     char* path = NULL;
