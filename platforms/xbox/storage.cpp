@@ -10,6 +10,7 @@
 #ifdef MELEE_XBOX_UWP
 #include <future>
 #include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_log.h>
 #include <SDL3/SDL_stdinc.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -21,6 +22,33 @@ namespace {
 fs::path selected_root = LR"(D:\developmentfiles\Melee)";
 std::string settings_path = R"(D:\developmentfiles\Melee\settings\)";
 std::string saves_path = R"(D:\developmentfiles\Melee\saves\)";
+
+#ifdef MELEE_XBOX_UWP
+winrt::Windows::Storage::StorageFolder removable_folder(const fs::path& path) {
+    using namespace winrt::Windows::Storage;
+    const auto devices = KnownFolders::RemovableDevices().GetFoldersAsync().get();
+    for (const auto& device : devices) {
+        const fs::path root(device.Path().c_str());
+        if (!is_within(root, path)) continue;
+        auto folder = device;
+        auto part = path.begin();
+        for (auto root_part = root.begin(); root_part != root.end(); ++root_part) ++part;
+        for (; part != path.end(); ++part)
+            folder = folder.GetFolderAsync(part->wstring()).get();
+        return folder;
+    }
+    throw winrt::hresult_error(winrt::hresult{static_cast<int32_t>(0x80004005u)},
+                               L"The selected USB drive is unavailable.");
+}
+
+void log_usb_error(const char* operation, const fs::path& path,
+                   const winrt::hresult_error& error) {
+    SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "USB %s %s failed (0x%08X): %s",
+                 operation, utf8_path(path).c_str(),
+                 static_cast<unsigned int>(error.code().value),
+                 winrt::to_string(error.message()).c_str());
+}
+#endif
 
 void set_root(const fs::path& root) {
     selected_root = root;
@@ -172,13 +200,14 @@ StorageSetup setup_storage(const fs::path& root, bool internal) {
         return std::async(std::launch::async, [root] {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             using namespace winrt::Windows::Storage;
-            auto drive = StorageFolder::GetFolderFromPathAsync(root.wstring()).get();
+            auto drive = removable_folder(root);
             auto melee = drive.CreateFolderAsync(L"Melee", CreationCollisionOption::OpenIfExists).get();
             for (const wchar_t* name : {L"textures", L"music", L"saves", L"settings"})
                 melee.CreateFolderAsync(name, CreationCollisionOption::OpenIfExists).get();
             return StorageSetup{fs::path(melee.Path().c_str()), {}};
         }).get();
     } catch (const winrt::hresult_error& e) {
+        log_usb_error("setup", root, e);
         setup.error = "Could not set up USB Melee folder: " + winrt::to_string(e.message());
     }
 #endif
@@ -251,8 +280,7 @@ Listing list_directory(const fs::path& root, const fs::path& directory) {
             listing = std::async(std::launch::async, [directory] {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
                 Listing listing;
-                auto folder = winrt::Windows::Storage::StorageFolder::GetFolderFromPathAsync(
-                    directory.wstring()).get();
+                auto folder = removable_folder(directory);
                 for (const auto& child : folder.GetFoldersAsync().get())
                     listing.entries.push_back({fs::path(child.Path().c_str()), true});
                 for (const auto& file : folder.GetFilesAsync().get()) {
@@ -262,6 +290,7 @@ Listing list_directory(const fs::path& root, const fs::path& directory) {
                 return listing;
             }).get();
         } catch (const winrt::hresult_error& e) {
+            log_usb_error("browse", directory, e);
             listing.error = winrt::to_string(e.message());
         }
         sort_entries(listing);
