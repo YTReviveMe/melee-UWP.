@@ -11,7 +11,8 @@ $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\10.0.26100.0\x64'
 $identity = ([xml](Get-Content (Join-Path $PSScriptRoot 'Package.appxmanifest') -Raw)).Package.Identity
 $pcVersion = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -TotalCount 1).Trim()
 if ($pcVersion -notmatch '^v?(\d+\.\d+\.\d+)$') { throw "Invalid PC version: $pcVersion" }
-if ($identity.Version -ne "$($Matches[1]).0") {
+$packageVersion = '^' + [regex]::Escape($Matches[1]) + '\.\d+$'
+if ($identity.Version -notmatch $packageVersion) {
     throw "Package version $($identity.Version) does not match PC version $pcVersion"
 }
 $vclibs = Join-Path ${env:ProgramFiles(x86)} 'Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs\14.0\Appx\Retail\x64\Microsoft.VCLibs.x64.14.00.appx'

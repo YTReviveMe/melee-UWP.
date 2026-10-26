@@ -3,7 +3,7 @@
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
          IgnorableNamespaces="uap">
   <Identity Name="MeleeUWP" Publisher="CN=MeleePC.XboxDev"
-            Version="0.4.2.0" ProcessorArchitecture="x64" />
+            Version="0.4.2.1" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Melee</DisplayName>
     <PublisherDisplayName>Melee</PublisherDisplayName>
